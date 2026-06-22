@@ -3,8 +3,10 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import 'config.dart';
 import 'services/remote_control_service.dart';
 import 'services/screen_capture_service.dart';
+import 'services/session_store.dart';
 import 'services/signaling_service.dart';
 import 'services/webrtc_service.dart';
 
@@ -36,6 +38,8 @@ class CallController extends ChangeNotifier {
 
   bool _hostSessionCreated = false; // guard against duplicate sessions on reconnect
   bool _iceRestarting = false; // guard against repeated ICE restarts
+  bool _reclaiming = false; // host is reclaiming an existing session
+  String _pendingJoinPin = ''; // pin the viewer last tried, saved on success
 
   void _setStatus(String s) {
     status = s;
@@ -52,6 +56,7 @@ class CallController extends ChangeNotifier {
     await remoteRenderer.initialize();
     _wireCallbacks();
     if (role == Role.host) await refreshAccessibility();
+    if (role == Role.viewer) await _loadRecentSessions();
     _setStatus('Connecting to server…');
     _signaling.connect(serverUrl);
   }
@@ -70,11 +75,18 @@ class CallController extends ChangeNotifier {
     _signaling.onConnectionChange = (connected) {
       signalingConnected = connected;
       _addLog(connected ? 'Signaling connected' : 'Signaling disconnected');
-      // Only create a session on the first connect — Socket.IO auto-reconnects,
-      // and we don't want a duplicate session each time it does.
-      if (connected && role == Role.host && !_hostSessionCreated) {
-        _hostSessionCreated = true;
-        _signaling.createSession();
+      if (connected && role == Role.host) {
+        if (!_hostSessionCreated) {
+          _hostSessionCreated = true;
+          _signaling.createSession();
+        } else if (sessionId != null) {
+          // Reconnected (Socket.IO auto-reconnect) — reclaim the SAME session
+          // instead of creating a new one, so the viewer can resume.
+          _addLog('Reconnected — reclaiming session $sessionId');
+          _reclaiming = true;
+          _webrtc.resetPeer();
+          _signaling.reclaimSession(sessionId!, sessionPin ?? '');
+        }
       } else if (connected && role == Role.viewer) {
         _setStatus('Enter a session ID to connect');
       }
@@ -82,13 +94,36 @@ class CallController extends ChangeNotifier {
     _signaling.onSessionCreated = (id, pin) {
       sessionId = id;
       sessionPin = pin;
-      _addLog('Session created: $id (PIN $pin)');
-      _setStatus('Waiting for viewer…');
+      SessionStore.saveHostSession(id, pin);
+      _addLog(_reclaiming ? 'Session reclaimed: $id' : 'Session created: $id (PIN $pin)');
+      _setStatus(_reclaiming ? 'Reclaimed — reconnecting viewer…' : 'Waiting for viewer…');
+      _reclaiming = false;
     };
     _signaling.onSessionJoined = (id) {
       sessionId = id;
+      SessionStore.addViewerHistory(id, _pendingJoinPin)
+          .then((_) => _loadRecentSessions());
       _addLog('Joined session $id');
       _setStatus('Negotiating…');
+      _webrtc.startAsViewer();
+    };
+    _signaling.onReclaimFailed = (message) {
+      _addLog('Reclaim failed: $message — starting a new session');
+      _reclaiming = false;
+      _webrtc.resetPeer();
+      _signaling.createSession();
+    };
+    _signaling.onHostDisconnected = () {
+      // Viewer side: host dropped but the session is held briefly — keep waiting.
+      peerConnected = false;
+      _addLog('Host disconnected — waiting for it to reconnect…');
+      _setStatus('Host reconnecting…');
+    };
+    _signaling.onHostReconnected = () {
+      // Viewer side: host is back and will re-offer; reset for a clean handshake.
+      _addLog('Host reconnected — renegotiating');
+      _setStatus('Reconnecting…');
+      _webrtc.resetPeer();
       _webrtc.startAsViewer();
     };
     _signaling.onSessionError = (message) {
@@ -151,8 +186,17 @@ class CallController extends ChangeNotifier {
 
   /// Viewer action: join the session the user typed in (with its PIN).
   void joinAsViewer(String id, String pin) {
+    _pendingJoinPin = pin.trim(); // saved to history once the join succeeds
     _setStatus('Joining $id…');
-    _signaling.joinSession(id.trim(), pin.trim());
+    _signaling.joinSession(id.trim(), _pendingJoinPin);
+  }
+
+  /// Viewer: recently-connected sessions, for one-tap rejoin (reactive).
+  List<SessionEntry> recentSessions = [];
+
+  Future<void> _loadRecentSessions() async {
+    recentSessions = await SessionStore.getViewerHistory();
+    notifyListeners();
   }
 
   /// Phase-2 verification helper: prove the P2P data channel works end-to-end.
@@ -165,6 +209,12 @@ class CallController extends ChangeNotifier {
   /// HOST: start the foreground service, then capture the screen via the system
   /// MediaProjection dialog, and add the track to the peer connection.
   Future<void> startSharing() async {
+    if (isMobileWeb) {
+      // Mobile browsers can't capture the screen; this would grab the camera.
+      _addLog('Screen sharing isn\'t supported in a mobile browser.');
+      _setStatus('Install the app to share this phone\'s screen');
+      return;
+    }
     try {
       // FGS must run before MediaProjection (Android 10+/14 requirement).
       await ScreenCaptureService.startService();

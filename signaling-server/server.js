@@ -24,6 +24,10 @@ const { Server } = require('socket.io');
 
 const PORT = process.env.PORT || 3000;
 
+// How long a session survives after the HOST drops, so the host can reconnect
+// and reclaim the same ID instead of the session dying instantly.
+const HOST_GRACE_MS = Number(process.env.HOST_GRACE_MS) || 60000;
+
 const app = express();
 const server = http.createServer(app);
 
@@ -124,6 +128,37 @@ io.on('connection', (socket) => {
     console.log(`[session] ${sessionId} joined by viewer ${socket.id}`);
   });
 
+  // --- Host reconnects and reclaims its session after a drop ---------------
+  socket.on('reclaim-session', ({ sessionId, pin } = {}) => {
+    const peers = sessions.get(sessionId);
+    if (!peers) {
+      socket.emit('reclaim-failed', { message: 'Session expired.' });
+      return;
+    }
+    if (peers.pin && String(pin) !== peers.pin) {
+      socket.emit('reclaim-failed', { message: 'Incorrect PIN.' });
+      return;
+    }
+    if (peers.host) {
+      socket.emit('reclaim-failed', { message: 'Session already active.' });
+      return;
+    }
+    // Cancel the grace timer and re-attach this socket as the host.
+    if (peers.graceTimer) {
+      clearTimeout(peers.graceTimer);
+      peers.graceTimer = null;
+    }
+    peers.host = socket.id;
+    socket.join(sessionId);
+    // Re-use the same id + pin so the viewer can stay/rejoin seamlessly.
+    socket.emit('session-created', { sessionId, pin: peers.pin });
+    if (peers.viewer) {
+      io.to(peers.viewer).emit('host-reconnected');
+      io.to(socket.id).emit('viewer-joined'); // prompt host to re-offer
+    }
+    console.log(`[session] ${sessionId} reclaimed by host ${socket.id}`);
+  });
+
   // --- Relay signaling to the other peer in the room -----------------------
   socket.on('signal', ({ sessionId, payload } = {}) => {
     const peers = sessions.get(sessionId);
@@ -142,14 +177,20 @@ io.on('connection', (socket) => {
     const { sessionId, peers, role } = found;
 
     if (role === 'host') {
-      // Host left -> tear down the whole session, notify the viewer.
-      if (peers.viewer) io.to(peers.viewer).emit('peer-left');
-      sessions.delete(sessionId);
-      console.log(`[session] ${sessionId} closed (host left)`);
+      // Host dropped -> keep the session alive for a grace period so the host
+      // can reconnect and reclaim it. Tell the viewer to wait, not give up.
+      peers.host = null;
+      if (peers.viewer) io.to(peers.viewer).emit('host-disconnected');
+      peers.graceTimer = setTimeout(() => {
+        if (peers.viewer) io.to(peers.viewer).emit('peer-left');
+        sessions.delete(sessionId);
+        console.log(`[session] ${sessionId} expired (host didn't return)`);
+      }, HOST_GRACE_MS);
+      console.log(`[session] ${sessionId} host dropped — ${HOST_GRACE_MS}ms grace`);
     } else {
       // Viewer left -> keep session open, free the viewer slot, notify host.
       peers.viewer = null;
-      io.to(peers.host).emit('peer-left');
+      if (peers.host) io.to(peers.host).emit('peer-left');
       console.log(`[session] ${sessionId} viewer left (session stays open)`);
     }
   });

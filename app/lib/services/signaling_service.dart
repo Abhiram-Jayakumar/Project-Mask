@@ -18,6 +18,9 @@ class SignalingService {
   void Function()? onViewerJoined;
   void Function(Map<String, dynamic> payload)? onSignal;
   void Function()? onPeerLeft;
+  void Function(String message)? onReclaimFailed;
+  void Function()? onHostDisconnected;
+  void Function()? onHostReconnected;
 
   bool get isConnected => _socket?.connected ?? false;
 
@@ -50,6 +53,11 @@ class SignalingService {
       onSignal?.call(Map<String, dynamic>.from(data['payload'] as Map));
     });
     socket.on('peer-left', (_) => onPeerLeft?.call());
+    socket.on('reclaim-failed', (data) {
+      onReclaimFailed?.call(data['message'] as String? ?? 'Reclaim failed');
+    });
+    socket.on('host-disconnected', (_) => onHostDisconnected?.call());
+    socket.on('host-reconnected', (_) => onHostReconnected?.call());
 
     socket.connect();
   }
@@ -58,6 +66,10 @@ class SignalingService {
 
   void joinSession(String id, String pin) =>
       _socket?.emit('join-session', {'sessionId': id, 'pin': pin});
+
+  /// Host: reclaim a previously-created session after a reconnect.
+  void reclaimSession(String id, String pin) =>
+      _socket?.emit('reclaim-session', {'sessionId': id, 'pin': pin});
 
   /// Relay an opaque WebRTC payload (offer/answer/ice) to the other peer.
   void sendSignal(Map<String, dynamic> payload) =>

@@ -1,7 +1,17 @@
 /// App-wide configuration constants.
 library;
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart'
+    show kIsWeb, defaultTargetPlatform, TargetPlatform;
+
+/// True when running in a **mobile browser** (Chrome/Safari on a phone). Such
+/// browsers do NOT support screen capture (`getDisplayMedia`) — only desktop
+/// browsers and the native Android app can host. Used to make the web app
+/// viewer-only on phones instead of accidentally grabbing the camera.
+bool get isMobileWeb =>
+    kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS);
 
 /// Default signaling server URL. Resolved in this order:
 ///   1. `--dart-define=SIGNALING_URL=...` (used for release builds pointing at

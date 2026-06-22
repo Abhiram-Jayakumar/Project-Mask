@@ -79,6 +79,25 @@ const fail = (msg) => { failed = true; console.error('  ✗ FAIL:', msg); };
   viewer.emit('signal', { sessionId, payload: { kind: 'answer', sdp: 'fake-sdp' } });
   await hostGotSignal;
 
+  // Reclaim test: host drops, the viewer is held, a new host reclaims the id.
+  const viewerSawHostGone = new Promise((r) => viewer.once('host-disconnected', r));
+  const viewerSawHostBack = new Promise((r) => viewer.once('host-reconnected', r));
+  host.close(); // simulate the host dropping
+  await viewerSawHostGone;
+  log('viewer', 'saw host-disconnected (session held) ✓');
+
+  const host2 = io(URL, { transports: ['websocket'] });
+  const reclaimedId = await new Promise((resolve) => {
+    host2.on('session-created', ({ sessionId: id }) => resolve(id));
+    host2.on('reclaim-failed', ({ message }) => fail('reclaim failed: ' + message));
+    host2.emit('reclaim-session', { sessionId, pin: sessionPin });
+  });
+  if (reclaimedId !== sessionId) fail('reclaimed a different session id');
+  else log('host2', 'reclaimed same session ✓:', reclaimedId);
+  await viewerSawHostBack;
+  log('viewer', 'saw host-reconnected ✓');
+  host2.close();
+
   // Error path: joining a bogus session.
   await new Promise((resolve) => {
     const stray = io(URL, { transports: ['websocket'] });

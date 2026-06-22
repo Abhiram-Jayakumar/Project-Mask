@@ -36,7 +36,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(
-        child: Padding(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 480),
+            child: Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -62,12 +65,22 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(height: 24),
               FilledButton.icon(
-                onPressed: () => _open(Role.host),
+                onPressed: isMobileWeb ? null : () => _open(Role.host),
                 icon: const Icon(Icons.screen_share),
                 style: FilledButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 18)),
                 label: const Text('Share my screen (Host)'),
               ),
+              if (isMobileWeb)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    "Mobile browsers can't capture the screen. Install the Android "
+                    'app to share this phone; the web app works as a viewer.',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ),
               const SizedBox(height: 12),
               OutlinedButton.icon(
                 onPressed: () => _open(Role.viewer),
@@ -83,6 +96,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ],
+          ),
+            ),
           ),
         ),
       ),

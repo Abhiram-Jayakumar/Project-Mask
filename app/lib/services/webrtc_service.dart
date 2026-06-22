@@ -202,11 +202,20 @@ class WebRtcService {
   void sendData(String text) =>
       _dataChannel?.send(RTCDataChannelMessage(text));
 
-  Future<void> dispose() async {
-    await stopLocalStream();
+  /// Tear down the peer connection for a fresh negotiation (used on reconnect /
+  /// reclaim) while KEEPING the local screen stream so the new offer re-includes
+  /// the video track.
+  Future<void> resetPeer() async {
     await _dataChannel?.close();
     await _pc?.close();
     _dataChannel = null;
     _pc = null;
+    _remoteDescriptionSet = false;
+    _pendingCandidates.clear();
+  }
+
+  Future<void> dispose() async {
+    await stopLocalStream();
+    await resetPeer();
   }
 }

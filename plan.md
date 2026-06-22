@@ -4,7 +4,7 @@
 > (an AnyDesk / RustDesk-style tool). 100% free stack, no paid SDKs or cloud.
 
 **Status legend:** `[x]` done · `[~]` in progress · `[ ]` not started
-**Last updated:** 2026-06-22 · **Status:** Phases 1–8 code-complete (core MVP validated on-device). Web app + same-server hosting added (one free deployment = signaling + browser app). Remaining: **deploy to Render + free TURN signup** (cross-network), on-device verification, optional polish (icon/splash).
+**Last updated:** 2026-06-22 · **Status:** LIVE at https://project-mask.onrender.com (web app + signaling). Cross-network web↔phone confirmed. Latest changes (responsive viewer, mobile-web viewer-only fix, session history + host reclaim) are built & smoke-tested but **need a git push to redeploy**. Remaining: free TURN for cellular, optional icon/splash.
 
 ---
 
@@ -280,8 +280,15 @@ Requirement: zero billing, works on **web AND app**, across different networks.
 - [x] Connection status chips + event log (graceful teardown via dispose)
 - [~] Bitrate/resolution tuning — done in code (8 Mbps + MAINTAIN_RESOLUTION),
       **pending on-device re-test**
-- [ ] Future: full session-resume across a *signaling* drop (host currently keeps
-      its session only while its socket stays alive)
+- [x] **Session resume:** server keeps a session for a 60s **grace period** after
+      the host drops (`HOST_GRACE_MS`); host **reclaims** the same id/pin on
+      reconnect; viewer gets `host-disconnected`/`host-reconnected` and re-handshakes
+      (both sides `resetPeer`). Smoke-tested.
+- [x] **Session history:** `SessionStore` (shared_preferences) persists viewer's
+      recent sessions → one-tap rejoin; host saves its last session id/pin
+- [x] **Mobile-web is viewer-only:** mobile browsers can't `getDisplayMedia`, so
+      Host is disabled on mobile web (`isMobileWeb`) with guidance — fixes the
+      "shares camera instead of screen" issue
 
 ### Phase 8 — Packaging & Release `[~]`
 - [x] App name → "Project Mask" (launcher label)
@@ -406,6 +413,22 @@ Requirement: zero billing, works on **web AND app**, across different networks.
   - **Next (user steps):** push to GitHub → deploy on Render (free) → sign up for
     free TURN → build APK with `--dart-define=SIGNALING_URL=<render>` + TURN. Then
     cross-network works for both the web app and the APK.
+- **2026-06-22 (DEPLOYED + UX fixes)** — Live at **https://project-mask.onrender.com**
+  (serves web app + signaling). Verified `/health` + assets. Built + installed the
+  release APK on the phone with `--dart-define=SIGNALING_URL=https://project-mask.onrender.com`;
+  **cross-network web-viewer ↔ phone-host confirmed working** by the user.
+  - **Responsive viewer:** remote screen now in a centered **phone-shaped frame**,
+    sized to the device aspect + capped height, whole page scrollable + width-capped
+    (fixes desktop-browser full-width stretch). Home screen width-capped too.
+  - **Fix — mobile web shared camera not screen:** mobile browsers can't
+    `getDisplayMedia`; Host is now disabled on mobile web (`isMobileWeb`) with a
+    note to use the app. Web on phones = viewer-only.
+  - **Session history + reconnect:** `SessionStore` (shared_preferences) keeps
+    viewer history (one-tap rejoin) + host's last session; server **grace period
+    (60s) + reclaim** lets a dropped host resume the same id (viewer waits via
+    `host-disconnected`/`host-reconnected`). Smoke test extended + passing.
+  - Verified: analyze clean, server smoke test (incl. reclaim) passes, web rebuilt.
+    **Not yet pushed/redeployed** — these changes need a `git push` to go live.
 
 ---
 
