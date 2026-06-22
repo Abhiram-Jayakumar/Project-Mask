@@ -1,0 +1,19 @@
+# Node
+node_modules/
+npm-debug.log*
+.env
+
+# Flutter / Dart build artifacts
+app/build/
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+*.log
+
+# Android signing secrets (also covered by app/android/.gitignore)
+**/key.properties
+**/*.jks
+**/*.keystore
+
+# IMPORTANT: do NOT ignore signaling-server/public — the built web app must be
+# committed so Render can serve it.

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Declares the capabilities of RemoteAccessibilityService. canPerformGestures
+     is the key one: it lets the service call dispatchGesture() to inject taps and
+     swipes. We don't need to observe accessibility events, so the event mask is
+     minimal. -->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canPerformGestures="true"
+    android:notificationTimeout="100"
+    android:description="@string/accessibility_service_description" />
