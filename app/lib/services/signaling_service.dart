@@ -21,6 +21,8 @@ class SignalingService {
   void Function(String message)? onReclaimFailed;
   void Function()? onHostDisconnected;
   void Function()? onHostReconnected;
+  void Function(String deviceId)? onDeviceArmed;
+  void Function(String reason)? onDeviceArmFailed;
 
   bool get isConnected => _socket?.connected ?? false;
 
@@ -58,11 +60,32 @@ class SignalingService {
     });
     socket.on('host-disconnected', (_) => onHostDisconnected?.call());
     socket.on('host-reconnected', (_) => onHostReconnected?.call());
+    socket.on('device-armed', (data) {
+      sessionId = data['deviceId'] as String?;
+      onDeviceArmed?.call(sessionId ?? '');
+    });
+    socket.on('device-arm-failed', (data) {
+      onDeviceArmFailed?.call(data['reason'] as String? ?? 'unknown');
+    });
 
     socket.connect();
   }
 
   void createSession() => _socket?.emit('create-session');
+
+  /// Host: arm this device for "anytime access" under its stable [deviceId],
+  /// validated against the salted PIN [pinHash].
+  void armDevice(String deviceId, String salt, String pinHash) {
+    sessionId = deviceId;
+    _socket?.emit('arm-device', {
+      'deviceId': deviceId,
+      'salt': salt,
+      'pinHash': pinHash,
+    });
+  }
+
+  /// Host: stop accepting anytime-access connections.
+  void disarmDevice() => _socket?.emit('disarm-device');
 
   void joinSession(String id, String pin) =>
       _socket?.emit('join-session', {'sessionId': id, 'pin': pin});

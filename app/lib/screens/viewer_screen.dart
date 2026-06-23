@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../call_controller.dart';
+import '../services/system_service.dart';
 import '../widgets/connection_panel.dart';
+import '../widgets/keep_alive_cards.dart';
 import '../widgets/remote_control_surface.dart';
 
 /// Viewer = the controlling device. Enters a session ID + PIN, watches the host's
@@ -19,20 +21,41 @@ class ViewerScreen extends StatefulWidget {
   State<ViewerScreen> createState() => _ViewerScreenState();
 }
 
-class _ViewerScreenState extends State<ViewerScreen> {
+class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver {
   late final CallController _controller;
   final TextEditingController _idController = TextEditingController();
   final TextEditingController _pinController = TextEditingController();
+  bool _closing = false; // set true only when the user ends the session
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _controller = CallController(role: Role.viewer, serverUrl: widget.serverUrl);
     _controller.start();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _controller.refreshBatteryOptimization();
+    }
+  }
+
+  /// Explicit "Close session": tear down, then leave the route (which disposes
+  /// the controller). [_closing] flips PopScope to allow this one pop.
+  Future<void> _closeSession() async {
+    await _controller.endSession();
+    if (!mounted) return;
+    setState(() => _closing = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Navigator.of(context).pop();
+    });
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
     _idController.dispose();
     _pinController.dispose();
@@ -41,7 +64,21 @@ class _ViewerScreenState extends State<ViewerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      // Back doesn't end the session; it backgrounds the app so the connection
+      // keeps running. Only the "Close session" button ends it.
+      canPop: _closing,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        // Connected → Back backgrounds the app (keeps the session running);
+        // otherwise Back leaves the screen as usual.
+        if (_controller.peerConnected) {
+          SystemService.moveTaskToBack();
+        } else {
+          _closeSession();
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(title: const Text('Viewer')),
       body: SafeArea(
         child: ListenableBuilder(
@@ -82,6 +119,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
                           Text(_controller.status,
                               style: Theme.of(context).textTheme.titleMedium),
                           const SizedBox(height: 12),
+                          BatteryOptimizationCard(controller: _controller),
                           if (!connected) ...[
                             _ConnectFields(
                               idController: _idController,
@@ -168,6 +206,8 @@ class _ViewerScreenState extends State<ViewerScreen> {
                             label: const Text('Send test ping'),
                           ),
                           const SizedBox(height: 12),
+                          CloseSessionButton(onPressed: _closeSession),
+                          const SizedBox(height: 12),
                           SizedBox(
                             height: 200,
                             child: ConnectionPanel(controller: _controller),
@@ -181,6 +221,7 @@ class _ViewerScreenState extends State<ViewerScreen> {
             );
           },
         ),
+      ),
       ),
     );
   }

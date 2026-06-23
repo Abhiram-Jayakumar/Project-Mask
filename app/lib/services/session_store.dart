@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -24,7 +25,57 @@ class SessionEntry {
 class SessionStore {
   static const _kViewerHistory = 'viewer_history';
   static const _kHostSession = 'host_session';
+  static const _kDeviceId = 'device_id'; // stable id for anytime access
+  static const _kDevicePinSalt = 'device_pin_salt';
+  static const _kDevicePinHash = 'device_pin_hash';
   static const _maxHistory = 10;
+
+  // ---- Anytime access: this device's STABLE id + permanent PIN ----
+  /// The device's permanent 9-digit id (generated once, reused forever) used for
+  /// "anytime access". Created and persisted on first call.
+  static Future<String> getOrCreateDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    final existing = prefs.getString(_kDeviceId);
+    if (existing != null && existing.isNotEmpty) return existing;
+    final id = _randomDeviceId();
+    await prefs.setString(_kDeviceId, id);
+    return id;
+  }
+
+  /// Replace the device id (used if the server reports a collision).
+  static Future<String> regenerateDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    final id = _randomDeviceId();
+    await prefs.setString(_kDeviceId, id);
+    return id;
+  }
+
+  static String _randomDeviceId() =>
+      '${100000000 + Random.secure().nextInt(900000000)}';
+
+  /// Store the permanent PIN as a salted hash (never the plaintext).
+  static Future<void> saveDevicePin(String salt, String hash) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kDevicePinSalt, salt);
+    await prefs.setString(_kDevicePinHash, hash);
+  }
+
+  /// Returns (salt, hash) if a permanent PIN has been set, else null.
+  static Future<({String salt, String hash})?> getDevicePin() async {
+    final prefs = await SharedPreferences.getInstance();
+    final salt = prefs.getString(_kDevicePinSalt);
+    final hash = prefs.getString(_kDevicePinHash);
+    if (salt == null || hash == null) return null;
+    return (salt: salt, hash: hash);
+  }
+
+  static Future<bool> hasDevicePin() async => (await getDevicePin()) != null;
+
+  static Future<void> clearDevicePin() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_kDevicePinSalt);
+    await prefs.remove(_kDevicePinHash);
+  }
 
   // ---- Viewer: history of sessions this device connected to ----
   static Future<List<SessionEntry>> getViewerHistory() async {

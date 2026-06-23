@@ -32,6 +32,13 @@ class _HomeScreenState extends State<HomeScreen> {
     ));
   }
 
+  void _openAnytime() {
+    final url = _urlController.text.trim();
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => HostScreen(serverUrl: url, mode: HostMode.anytime),
+    ));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -81,6 +88,14 @@ class _HomeScreenState extends State<HomeScreen> {
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: isMobileWeb ? null : _openAnytime,
+                icon: const Icon(Icons.lock_clock),
+                style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 18)),
+                label: const Text('Anytime access (set up once)'),
+              ),
               const SizedBox(height: 12),
               OutlinedButton.icon(
                 onPressed: () => _open(Role.viewer),

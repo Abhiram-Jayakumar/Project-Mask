@@ -4,7 +4,7 @@
 > (an AnyDesk / RustDesk-style tool). 100% free stack, no paid SDKs or cloud.
 
 **Status legend:** `[x]` done · `[~]` in progress · `[ ]` not started
-**Last updated:** 2026-06-22 · **Status:** LIVE at https://project-mask.onrender.com (web app + signaling). Cross-network web↔phone confirmed. Latest changes (responsive viewer, mobile-web viewer-only fix, session history + host reclaim) are built & smoke-tested but **need a git push to redeploy**. Remaining: free TURN for cellular, optional icon/splash.
+**Last updated:** 2026-06-22 · **Status:** LIVE + up to date at https://project-mask.onrender.com (web app + signaling, responsive viewer, mobile-web viewer-only, session history + host reclaim all deployed; APK reinstalled on phone). Cross-network web↔phone confirmed. Remaining: free TURN for cellular, optional icon/splash, on-device re-test of quality/reconnect.
 
 ---
 
@@ -428,7 +428,9 @@ Requirement: zero billing, works on **web AND app**, across different networks.
     (60s) + reclaim** lets a dropped host resume the same id (viewer waits via
     `host-disconnected`/`host-reconnected`). Smoke test extended + passing.
   - Verified: analyze clean, server smoke test (incl. reclaim) passes, web rebuilt.
-    **Not yet pushed/redeployed** — these changes need a `git push` to go live.
+  - **Pushed (commit 3ee20b6) + Render redeployed** (live main.dart.js matches the
+    local build); **release APK rebuilt + reinstalled** on the phone (in-place
+    update, accessibility preserved). All three platforms now in sync.
 
 ---
 

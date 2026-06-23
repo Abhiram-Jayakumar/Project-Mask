@@ -4,21 +4,33 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'config.dart';
+import 'services/connection_service.dart';
+import 'services/pin_crypto.dart';
 import 'services/remote_control_service.dart';
 import 'services/screen_capture_service.dart';
 import 'services/session_store.dart';
 import 'services/signaling_service.dart';
+import 'services/system_service.dart';
 import 'services/webrtc_service.dart';
 
 enum Role { host, viewer }
 
+/// Host sub-mode: a one-off RANDOM session (quick) vs a stable device id +
+/// permanent PIN for Chrome-Remote-Desktop-style "anytime access".
+enum HostMode { quick, anytime }
+
 /// Orchestrates the signaling + WebRTC services and exposes a single, simple
 /// state surface for the UI. One controller per active session.
 class CallController extends ChangeNotifier {
-  CallController({required this.role, required this.serverUrl});
+  CallController({
+    required this.role,
+    required this.serverUrl,
+    this.hostMode = HostMode.quick,
+  });
 
   final Role role;
   final String serverUrl;
+  final HostMode hostMode;
 
   final SignalingService _signaling = SignalingService();
   final WebRtcService _webrtc = WebRtcService();
@@ -34,11 +46,21 @@ class CallController extends ChangeNotifier {
   bool peerConnected = false;
   bool isSharing = false;
   bool accessibilityEnabled = false;
+  bool ignoringBatteryOptimizations = true; // true = exempt (or web/unsupported)
+
+  // Anytime access (permanent PIN) — host, anytime mode only.
+  String? deviceId; // stable id shown to viewers
+  bool hasPin = false; // a permanent PIN has been set
+  bool armed = false; // accepting anytime-access connections
+  String? _pinSalt;
+  String? _pinHash;
+
   final List<String> log = [];
 
   bool _hostSessionCreated = false; // guard against duplicate sessions on reconnect
   bool _iceRestarting = false; // guard against repeated ICE restarts
   bool _reclaiming = false; // host is reclaiming an existing session
+  bool _keepAliveStarted = false; // viewer keep-alive FGS started
   String _pendingJoinPin = ''; // pin the viewer last tried, saved on success
 
   void _setStatus(String s) {
@@ -56,9 +78,25 @@ class CallController extends ChangeNotifier {
     await remoteRenderer.initialize();
     _wireCallbacks();
     if (role == Role.host) await refreshAccessibility();
+    if (role == Role.host && hostMode == HostMode.anytime) {
+      await _loadDeviceIdentity();
+    }
     if (role == Role.viewer) await _loadRecentSessions();
+    await refreshBatteryOptimization();
     _setStatus('Connecting to server…');
     _signaling.connect(serverUrl);
+  }
+
+  /// ANYTIME HOST: load the stable device id + any saved permanent PIN.
+  Future<void> _loadDeviceIdentity() async {
+    deviceId = await SessionStore.getOrCreateDeviceId();
+    final stored = await SessionStore.getDevicePin();
+    if (stored != null) {
+      _pinSalt = stored.salt;
+      _pinHash = stored.hash;
+      hasPin = true;
+    }
+    notifyListeners();
   }
 
   /// HOST: re-check whether the accessibility service is enabled (call on resume
@@ -71,11 +109,31 @@ class CallController extends ChangeNotifier {
   void openAccessibilitySettings() =>
       RemoteControlService.openAccessibilitySettings();
 
+  /// Re-check whether the app is exempt from battery optimization. A session can
+  /// only reliably survive the app being swiped off recents when it is. Call on
+  /// resume (after the user returns from the system prompt).
+  Future<void> refreshBatteryOptimization() async {
+    ignoringBatteryOptimizations =
+        await SystemService.isIgnoringBatteryOptimizations();
+    notifyListeners();
+  }
+
+  void requestBatteryOptimization() =>
+      SystemService.requestIgnoreBatteryOptimizations();
+
   void _wireCallbacks() {
     _signaling.onConnectionChange = (connected) {
       signalingConnected = connected;
       _addLog(connected ? 'Signaling connected' : 'Signaling disconnected');
-      if (connected && role == Role.host) {
+      if (connected && role == Role.host && hostMode == HostMode.anytime) {
+        // Anytime mode: never create a random session. If already armed, re-arm
+        // on (re)connect so a waiting viewer can resume.
+        if (armed && _pinSalt != null && _pinHash != null) {
+          _addLog('Reconnected — re-arming device $deviceId');
+          _webrtc.resetPeer();
+          _signaling.armDevice(deviceId!, _pinSalt!, _pinHash!);
+        }
+      } else if (connected && role == Role.host) {
         if (!_hostSessionCreated) {
           _hostSessionCreated = true;
           _signaling.createSession();
@@ -112,6 +170,30 @@ class CallController extends ChangeNotifier {
       _reclaiming = false;
       _webrtc.resetPeer();
       _signaling.createSession();
+    };
+    _signaling.onDeviceArmed = (id) {
+      deviceId = id;
+      armed = true;
+      _addLog('Device armed — viewers can connect with the PIN');
+      _setStatus(peerConnected
+          ? 'Connected (peer-to-peer)'
+          : 'Ready — waiting for a viewer');
+    };
+    _signaling.onDeviceArmFailed = (reason) async {
+      if (reason == 'id-taken') {
+        // Extremely rare 9-digit collision: take a new id and re-arm.
+        deviceId = await SessionStore.regenerateDeviceId();
+        _addLog('Device ID was in use — switched to $deviceId');
+        if (armed && _pinSalt != null && _pinHash != null) {
+          _signaling.armDevice(deviceId!, _pinSalt!, _pinHash!);
+        }
+        notifyListeners();
+      } else {
+        armed = false;
+        _addLog('Couldn\'t allow connections: $reason');
+        _setStatus('Couldn\'t allow connections');
+        notifyListeners();
+      }
     };
     _signaling.onHostDisconnected = () {
       // Viewer side: host dropped but the session is held briefly — keep waiting.
@@ -155,6 +237,13 @@ class CallController extends ChangeNotifier {
       if (peerConnected) {
         _iceRestarting = false;
         _setStatus('Connected (peer-to-peer)');
+        // VIEWER: start the keep-alive FGS so the session survives the app being
+        // swiped off recents. (The host is already kept alive by the screen-
+        // capture FGS while sharing.)
+        if (role == Role.viewer && !_keepAliveStarted) {
+          _keepAliveStarted = true;
+          ConnectionService.startKeepAlive();
+        }
       } else if (state ==
               RTCPeerConnectionState.RTCPeerConnectionStateFailed &&
           role == Role.host &&
@@ -204,6 +293,48 @@ class CallController extends ChangeNotifier {
     final msg = 'ping@${DateTime.now().millisecondsSinceEpoch}';
     _webrtc.sendData(msg);
     _addLog('Sent: $msg');
+  }
+
+  /// ANYTIME HOST: set/replace the permanent PIN (stored hashed). If already
+  /// armed, re-arm so the new PIN takes effect immediately.
+  Future<void> setPermanentPin(String pin) async {
+    final salt = PinCrypto.generateSalt();
+    final hash = PinCrypto.hash(salt, pin);
+    await SessionStore.saveDevicePin(salt, hash);
+    _pinSalt = salt;
+    _pinHash = hash;
+    hasPin = true;
+    _addLog('Permanent PIN set');
+    if (armed && deviceId != null) _signaling.armDevice(deviceId!, salt, hash);
+    notifyListeners();
+  }
+
+  /// ANYTIME HOST: start accepting connections. Requires a PIN; starts screen
+  /// capture (one consent dialog) so viewers get video the instant they connect,
+  /// then arms the device on the server.
+  Future<void> armDevice() async {
+    if (!hasPin || _pinSalt == null || _pinHash == null || deviceId == null) {
+      _setStatus('Set a PIN first');
+      return;
+    }
+    if (!isSharing) {
+      await startSharing();
+      if (!isSharing) return; // user cancelled the capture consent dialog
+    }
+    armed = true;
+    _addLog('Allowing remote connections…');
+    _signaling.armDevice(deviceId!, _pinSalt!, _pinHash!);
+    notifyListeners();
+  }
+
+  /// ANYTIME HOST: stop accepting connections and stop capturing.
+  Future<void> disarmDevice() async {
+    armed = false;
+    _signaling.disarmDevice();
+    await stopSharing();
+    _addLog('Stopped allowing remote connections');
+    _setStatus('Not allowing connections');
+    notifyListeners();
   }
 
   /// HOST: start the foreground service, then capture the screen via the system
@@ -273,6 +404,28 @@ class CallController extends ChangeNotifier {
     isSharing = false;
     _addLog('Screen capture stopped');
     _setStatus(peerConnected ? 'Connected (peer-to-peer)' : status);
+  }
+
+  /// Explicitly END the session. This is the ONLY thing that drops the
+  /// connection — backgrounding / swiping the app off recents intentionally
+  /// keeps it alive. Stops the keep-alive foreground service(s); the caller then
+  /// pops back to Home, which disposes this controller (closing the peer +
+  /// signaling socket so the other side sees the disconnect).
+  Future<void> endSession() async {
+    if (role == Role.host) {
+      if (armed) {
+        armed = false;
+        _signaling.disarmDevice();
+      }
+      if (isSharing) await _webrtc.stopLocalStream();
+      await ScreenCaptureService.stopService();
+      isSharing = false;
+    } else {
+      await ConnectionService.stopKeepAlive();
+      _keepAliveStarted = false;
+    }
+    _addLog('Session closed by user');
+    _setStatus('Session closed');
   }
 
   @override

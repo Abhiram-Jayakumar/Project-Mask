@@ -14,12 +14,20 @@
  *   When a viewer joins, the host receives "viewer-joined".
  *   Either peer: emit "signal" { sessionId, payload } -> the OTHER peer receives "signal" { payload }
  *   On disconnect, the remaining peer receives "peer-left".
+ *
+ *   Anytime access (permanent PIN, Chrome-Remote-Desktop style):
+ *   Host:   emit "arm-device" { deviceId, salt, pinHash } -> recv "device-armed" { deviceId }
+ *                                                          or recv "device-arm-failed" { reason }
+ *           emit "disarm-device"                           -> recv "device-disarmed"
+ *   Viewer: joins an armed device with the same "join-session" { sessionId: deviceId, pin };
+ *           the server validates pin against the stored salted hash.
  */
 
 const express = require('express');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { Server } = require('socket.io');
 
 const PORT = process.env.PORT || 3000;
@@ -27,6 +35,18 @@ const PORT = process.env.PORT || 3000;
 // How long a session survives after the HOST drops, so the host can reconnect
 // and reclaim the same ID instead of the session dying instantly.
 const HOST_GRACE_MS = Number(process.env.HOST_GRACE_MS) || 60000;
+
+// "Anytime access": after this many wrong PINs on an armed (permanent) device,
+// reject joins for a cooldown so a permanent PIN can't be brute-forced.
+const MAX_PIN_FAILS = Number(process.env.MAX_PIN_FAILS) || 5;
+const LOCKOUT_MS = Number(process.env.LOCKOUT_MS) || 30000;
+
+/** Salted SHA-256 of a PIN, matching the host's pin_crypto.dart. The server
+ *  never sees or stores the canonical PIN — only this hash (supplied at arm
+ *  time) and the viewer's plaintext attempt in transit. */
+function hashPin(salt, pin) {
+  return crypto.createHash('sha256').update(String(salt) + String(pin)).digest('hex');
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -104,6 +124,63 @@ io.on('connection', (socket) => {
     console.log(`[session] ${sessionId} created by host ${socket.id}`);
   });
 
+  // --- Host arms a PERMANENT device for "anytime access" -------------------
+  // The session is keyed by the host's STABLE device id and validated against a
+  // salted PIN hash. While armed, any viewer with the device id + PIN connects
+  // with no further host taps.
+  socket.on('arm-device', ({ deviceId, salt, pinHash } = {}) => {
+    if (!deviceId || !salt || !pinHash) {
+      socket.emit('device-arm-failed', { reason: 'invalid' });
+      return;
+    }
+    const existing = sessions.get(deviceId);
+    if (existing) {
+      // A different LIVE host already holds this id — ask the client to pick a
+      // new one (id collision; rare in a 9-digit space).
+      if (existing.host && existing.host !== socket.id) {
+        socket.emit('device-arm-failed', { reason: 'id-taken' });
+        console.log(`[anytime] ${deviceId} arm rejected — id in use`);
+        return;
+      }
+      // Same device returning (within grace, or re-arming) — re-attach + refresh.
+      if (existing.graceTimer) {
+        clearTimeout(existing.graceTimer);
+        existing.graceTimer = null;
+      }
+      Object.assign(existing, {
+        host: socket.id, salt, pinHash, permanent: true, armed: true, fails: 0,
+        lockedUntil: 0,
+      });
+      socket.join(deviceId);
+      socket.emit('device-armed', { deviceId });
+      if (existing.viewer) {
+        io.to(existing.viewer).emit('host-reconnected');
+        io.to(socket.id).emit('viewer-joined'); // prompt host to re-offer
+      }
+      console.log(`[anytime] ${deviceId} re-armed by host ${socket.id}`);
+      return;
+    }
+    sessions.set(deviceId, {
+      host: socket.id, viewer: null, salt, pinHash,
+      permanent: true, armed: true, fails: 0, lockedUntil: 0,
+    });
+    socket.join(deviceId);
+    socket.emit('device-armed', { deviceId });
+    console.log(`[anytime] ${deviceId} armed by host ${socket.id}`);
+  });
+
+  // --- Host disarms its permanent device -----------------------------------
+  socket.on('disarm-device', () => {
+    const found = findSessionBySocket(socket.id);
+    if (!found || found.role !== 'host') return;
+    const { sessionId, peers } = found;
+    if (peers.viewer) io.to(peers.viewer).emit('peer-left');
+    if (peers.graceTimer) clearTimeout(peers.graceTimer);
+    sessions.delete(sessionId);
+    socket.emit('device-disarmed', { deviceId: sessionId });
+    console.log(`[anytime] ${sessionId} disarmed by host ${socket.id}`);
+  });
+
   // --- Viewer joins an existing session ------------------------------------
   socket.on('join-session', ({ sessionId, pin } = {}) => {
     const peers = sessions.get(sessionId);
@@ -111,7 +188,30 @@ io.on('connection', (socket) => {
       socket.emit('session-error', { message: 'Session not found.' });
       return;
     }
-    if (peers.pin && String(pin) !== peers.pin) {
+    if (peers.permanent) {
+      // Anytime-access device: must be armed + online, PIN validated by hash,
+      // with lockout after too many wrong attempts.
+      if (!peers.armed || !peers.host) {
+        socket.emit('session-error', { message: 'Device is not accepting connections.' });
+        return;
+      }
+      if (peers.lockedUntil && Date.now() < peers.lockedUntil) {
+        socket.emit('session-error', { message: 'Too many attempts — try again later.' });
+        return;
+      }
+      if (hashPin(peers.salt, String(pin)) !== peers.pinHash) {
+        peers.fails = (peers.fails || 0) + 1;
+        if (peers.fails >= MAX_PIN_FAILS) {
+          peers.lockedUntil = Date.now() + LOCKOUT_MS;
+          peers.fails = 0;
+          console.log(`[anytime] ${sessionId} locked — too many bad PINs`);
+        }
+        socket.emit('session-error', { message: 'Incorrect PIN.' });
+        return;
+      }
+      peers.fails = 0;
+      peers.lockedUntil = 0;
+    } else if (peers.pin && String(pin) !== peers.pin) {
       socket.emit('session-error', { message: 'Incorrect PIN.' });
       console.log(`[session] ${sessionId} rejected viewer ${socket.id} (bad PIN)`);
       return;

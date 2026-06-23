@@ -15,9 +15,16 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
+    <!-- Generic keep-alive foreground service for the viewer role (connectedDevice
+         type is satisfied by the CHANGE_NETWORK_STATE permission above). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+    <!-- Lets the app ask to be exempted from battery optimization so a connected
+         session survives the app being swiped off recents on aggressive OEMs. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+
     <application
         android:label="Project Mask"
-        android:name="${applicationName}"
+        android:name=".MaskApplication"
         android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"
@@ -41,11 +48,23 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
-        <!-- Foreground service that holds the MediaProjection while sharing. -->
+        <!-- Foreground service that holds the MediaProjection while sharing.
+             stopWithTask="false" keeps it (and the process + cached engine)
+             running when the user swipes the app off recents, so the host session
+             survives until it's explicitly closed. -->
         <service
             android:name=".ScreenCaptureService"
             android:exported="false"
+            android:stopWithTask="false"
             android:foregroundServiceType="mediaProjection" />
+
+        <!-- Generic keep-alive foreground service for the viewer role; also
+             survives task removal so the control link isn't dropped. -->
+        <service
+            android:name=".ConnectionService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <!-- Accessibility service that injects remote taps/swipes via
              dispatchGesture(). Must be enabled manually by the user in Settings. -->
