@@ -41,16 +41,27 @@ String get defaultSignalingUrl {
 ///     --dart-define=TURN_URL=turn:your.host:3478 \
 ///     --dart-define=TURN_USERNAME=user \
 ///     --dart-define=TURN_CREDENTIAL=pass
+/// TURN config (baked in at build time). [TURN_URL] may be a SINGLE url or a
+/// COMMA-SEPARATED list so you can supply several transports that share the same
+/// credentials, e.g. a UDP relay plus a TLS/443 fallback (the latter punches
+/// through restrictive mobile-carrier firewalls that block the default 3478/UDP):
+///   --dart-define=TURN_URL=turn:relay1.expressturn.com:3478,turns:relay1.expressturn.com:443
 const String _turnUrl = String.fromEnvironment('TURN_URL');
 const String _turnUsername = String.fromEnvironment('TURN_USERNAME');
 const String _turnCredential = String.fromEnvironment('TURN_CREDENTIAL');
 
+List<String> get _turnUrls => _turnUrl
+    .split(',')
+    .map((u) => u.trim())
+    .where((u) => u.isNotEmpty)
+    .toList();
+
 List<Map<String, dynamic>> get iceServers => [
       {'urls': 'stun:stun.l.google.com:19302'},
       {'urls': 'stun:stun1.l.google.com:19302'},
-      if (_turnUrl.isNotEmpty)
+      if (_turnUrls.isNotEmpty)
         {
-          'urls': _turnUrl,
+          'urls': _turnUrls,
           'username': _turnUsername,
           'credential': _turnCredential,
         },

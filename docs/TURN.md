@@ -30,14 +30,20 @@ A short free signup gets you credentials (no credit card). As of 2026:
 - **Metered** ([metered.ca/stun-turn](https://www.metered.ca/stun-turn)) — free
   tier with unlimited STUN, no credit card.
 
-Sign up, copy the TURN URL + username + credential into the build:
+Sign up, copy the TURN URL(s) + username + credential into the build. `TURN_URL`
+accepts a **comma-separated list** that shares the same credentials — include the
+**TLS/443** url as well as the UDP one so it still works on mobile-carrier
+networks that block 3478/UDP:
 
 ```bash
 flutter build apk --release \
-  --dart-define=TURN_URL=turn:relay.expressturn.com:3478 \
+  --dart-define=SIGNALING_URL=https://project-mask.onrender.com \
+  --dart-define=TURN_URL=turn:relay1.expressturn.com:3478,turns:relay1.expressturn.com:443 \
   --dart-define=TURN_USERNAME=<your-username> \
   --dart-define=TURN_CREDENTIAL=<your-credential>
 ```
+
+(Use the exact host/ports shown on your provider's dashboard.)
 
 > Note: the old no-signup "Open Relay" static credentials
 > (`openrelay.metered.ca` / `openrelayproject`) have been **retired** — Open Relay
