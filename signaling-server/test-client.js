@@ -179,9 +179,44 @@ const fail = (msg) => { failed = true; console.error('  ✗ FAIL:', msg); };
     });
     attacker.emit('join-session', { sessionId: lockId, pin: '111111' });
   });
+  // Reconnect / network-switch: the same device re-arming from a NEW socket
+  // while its old socket is still present must KEEP its id (not be told id-taken).
+  const reId = '987611111';
+  const reHost1 = io(URL, { transports: ['websocket'] });
+  await new Promise((resolve) => {
+    reHost1.on('device-armed', resolve);
+    reHost1.emit('arm-device', { deviceId: reId, salt, pinHash });
+  });
+  const reHost2 = io(URL, { transports: ['websocket'] });
+  await new Promise((resolve) => {
+    reHost2.on('device-armed', ({ deviceId: id }) => {
+      if (id !== reId) fail('reconnect changed the device id');
+      else log('reconnect', 'same device re-armed from new socket, kept id ✓:', id);
+      resolve();
+    });
+    reHost2.on('device-arm-failed', ({ reason }) =>
+      fail('reconnect wrongly rejected as ' + reason));
+    reHost2.emit('arm-device', { deviceId: reId, salt, pinHash });
+  });
+  // A genuinely DIFFERENT device (different PIN hash) on the same id is rejected.
+  const otherHash = crypto.createHash('sha256').update(salt + '999999').digest('hex');
+  await new Promise((resolve) => {
+    const collider = io(URL, { transports: ['websocket'] });
+    collider.on('device-arm-failed', ({ reason }) => {
+      if (reason === 'id-taken') log('collision', 'different device on same id rejected ✓');
+      else fail('collision wrong reason: ' + reason);
+      collider.close();
+      resolve();
+    });
+    collider.on('device-armed', () => fail('collision was wrongly armed'));
+    collider.emit('arm-device', { deviceId: reId, salt, pinHash: otherHash });
+  });
+
   permViewer.close();
   armHost.close();
   lockHost.close();
+  reHost1.close();
+  reHost2.close();
 
   host.close();
   viewer.close();

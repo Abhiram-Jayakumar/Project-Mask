@@ -135,14 +135,20 @@ io.on('connection', (socket) => {
     }
     const existing = sessions.get(deviceId);
     if (existing) {
-      // A different LIVE host already holds this id — ask the client to pick a
-      // new one (id collision; rare in a 9-digit space).
-      if (existing.host && existing.host !== socket.id) {
+      // A different socket claiming this id is a real COLLISION only if its PIN
+      // hash differs. A MATCHING hash means it's the same device reconnecting
+      // (e.g. after a Wi-Fi <-> mobile-data switch) before its old socket has
+      // timed out — let it reclaim its own session and keep the same id instead
+      // of being forced onto a new one.
+      if (existing.host &&
+          existing.host !== socket.id &&
+          existing.pinHash !== pinHash) {
         socket.emit('device-arm-failed', { reason: 'id-taken' });
-        console.log(`[anytime] ${deviceId} arm rejected — id in use`);
+        console.log(`[anytime] ${deviceId} arm rejected — id used by another device`);
         return;
       }
-      // Same device returning (within grace, or re-arming) — re-attach + refresh.
+      // Same device returning (reconnect / re-arm) — re-attach + refresh,
+      // replacing any stale previous host socket.
       if (existing.graceTimer) {
         clearTimeout(existing.graceTimer);
         existing.graceTimer = null;
