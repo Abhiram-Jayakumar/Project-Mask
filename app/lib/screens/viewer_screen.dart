@@ -264,7 +264,9 @@ class _ConnectFields extends StatelessWidget {
               child: TextField(
                 controller: pinController,
                 keyboardType: TextInputType.number,
-                maxLength: 4,
+                // Accepts the 4-digit quick-session PIN and the 6–8 digit
+                // permanent "anytime access" PIN.
+                maxLength: 8,
                 decoration: const InputDecoration(
                   labelText: 'PIN',
                   border: OutlineInputBorder(),
