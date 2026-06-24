@@ -35,8 +35,13 @@ class CallController extends ChangeNotifier {
   final SignalingService _signaling = SignalingService();
   final WebRtcService _webrtc = WebRtcService();
 
-  /// Renders the remote screen on the viewer (empty until Phase 3 adds media).
+  /// Renders the remote screen on the viewer.
   final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
+
+  /// HOST: local front-camera self-preview. VIEWER: the host's camera presence
+  /// feed (shown in a small tile). Empty until the host shares their camera.
+  final RTCVideoRenderer cameraRenderer = RTCVideoRenderer();
+  bool cameraOn = false;
 
   String status = 'Idle';
   String? sessionId;
@@ -76,6 +81,7 @@ class CallController extends ChangeNotifier {
 
   Future<void> start() async {
     await remoteRenderer.initialize();
+    await cameraRenderer.initialize();
     _wireCallbacks();
     if (role == Role.host) await refreshAccessibility();
     if (role == Role.host && hostMode == HostMode.anytime) {
@@ -272,6 +278,19 @@ class CallController extends ChangeNotifier {
       _addLog('Remote stream attached');
       notifyListeners();
     };
+    _webrtc.onCameraStream = (stream) {
+      // VIEWER: the host turned their camera on.
+      cameraRenderer.srcObject = stream;
+      cameraOn = true;
+      _addLog('Host camera on');
+      notifyListeners();
+    };
+    _webrtc.onCameraRemoved = () {
+      cameraRenderer.srcObject = null;
+      cameraOn = false;
+      _addLog('Host camera off');
+      notifyListeners();
+    };
   }
 
   /// Viewer action: join the session the user typed in (with its PIN).
@@ -333,6 +352,7 @@ class CallController extends ChangeNotifier {
     armed = false;
     _signaling.disarmDevice();
     await SessionStore.setArmedState(false);
+    if (cameraOn) await stopCamera();
     await stopSharing();
     _addLog('Stopped allowing remote connections');
     _setStatus('Not allowing connections');
@@ -399,6 +419,37 @@ class CallController extends ChangeNotifier {
     return true;
   }
 
+  /// HOST: share the front camera as a "presence" tile so the viewer can see
+  /// you're there (consensual, like a video call). You explicitly enable it,
+  /// see your own preview, and Android shows the camera indicator the whole time.
+  Future<void> shareCamera() async {
+    if (cameraOn || kIsWeb) return;
+    try {
+      final stream = await navigator.mediaDevices.getUserMedia({
+        'audio': false,
+        'video': {'facingMode': 'user'},
+      });
+      cameraRenderer.srcObject = stream; // local self-preview
+      await _webrtc.addCameraTrack(stream);
+      cameraOn = true;
+      _addLog('Camera shared');
+      notifyListeners();
+    } catch (e) {
+      _addLog('Camera failed: $e');
+      _setStatus('Camera permission needed');
+    }
+  }
+
+  /// HOST: stop sharing the camera.
+  Future<void> stopCamera() async {
+    if (!cameraOn) return;
+    cameraRenderer.srcObject = null;
+    await _webrtc.removeCameraTrack();
+    cameraOn = false;
+    _addLog('Camera stopped');
+    notifyListeners();
+  }
+
   /// HOST: stop capturing and tear down the foreground service.
   Future<void> stopSharing() async {
     await _webrtc.stopLocalStream();
@@ -436,6 +487,7 @@ class CallController extends ChangeNotifier {
     _webrtc.dispose();
     _signaling.dispose();
     remoteRenderer.dispose();
+    cameraRenderer.dispose();
     super.dispose();
   }
 }

@@ -16,6 +16,13 @@ class WebRtcService {
   RTCDataChannel? _dataChannel;
   MediaStream? _localStream;
 
+  // HOST: optional front-camera "presence" stream, sent as a SECOND video track
+  // alongside the screen. VIEWER: the inbound stream id we've been told is the
+  // camera (signaled on the offer) so onTrack can route it to the camera tile.
+  MediaStream? _cameraStream;
+  RTCRtpSender? _cameraSender;
+  String? _remoteCameraStreamId;
+
   // ICE candidates can arrive before the remote description is set; buffer them.
   bool _remoteDescriptionSet = false;
   final List<RTCIceCandidate> _pendingCandidates = [];
@@ -27,6 +34,8 @@ class WebRtcService {
   void Function(String text)? onDataMessage;
   void Function(bool open)? onDataChannelOpen;
   void Function(MediaStream stream)? onRemoteStream;
+  void Function(MediaStream stream)? onCameraStream; // viewer: host camera arrived
+  void Function()? onCameraRemoved; // viewer: host turned camera off
 
   RTCPeerConnection? get peerConnection => _pc;
 
@@ -49,7 +58,15 @@ class WebRtcService {
     };
     pc.onConnectionState = (state) => onConnectionState?.call(state);
     pc.onTrack = (event) {
-      if (event.streams.isNotEmpty) onRemoteStream?.call(event.streams.first);
+      if (event.streams.isEmpty) return;
+      final stream = event.streams.first;
+      // Route the camera presence track to its own renderer; everything else is
+      // the screen. The camera stream id is signaled on the offer.
+      if (_remoteCameraStreamId != null && stream.id == _remoteCameraStreamId) {
+        onCameraStream?.call(stream);
+      } else {
+        onRemoteStream?.call(stream);
+      }
     };
     // Viewer side receives the host-created channel here.
     pc.onDataChannel = _bindDataChannel;
@@ -73,6 +90,10 @@ class WebRtcService {
 
     if (_localStream != null) {
       await _addStreamTracks(_localStream!);
+    }
+    // Re-attach the camera presence track too (e.g. after a reconnect).
+    if (_cameraStream != null) {
+      await _attachCameraTracks();
     }
     await _createAndSendOffer();
   }
@@ -144,10 +165,81 @@ class WebRtcService {
     _localStream = null;
   }
 
+  /// HOST: add the front-camera "presence" stream as a second video track and
+  /// renegotiate. The host has explicitly opted in (and Android shows the camera
+  /// indicator). Safe to call before the peer exists — it's attached in
+  /// [startAsHost].
+  Future<void> addCameraTrack(MediaStream camStream) async {
+    _cameraStream = camStream;
+    if (_pc == null) return;
+    await _attachCameraTracks();
+    await _createAndSendOffer();
+  }
+
+  Future<void> _attachCameraTracks() async {
+    final stream = _cameraStream;
+    if (stream == null || _pc == null) return;
+    for (final track in stream.getTracks()) {
+      final sender = await _pc!.addTrack(track, stream);
+      if (track.kind == 'video') {
+        _cameraSender = sender;
+        await _applyCameraQuality(sender);
+      }
+    }
+  }
+
+  /// The camera tile is small, so cap it low to leave bandwidth for the screen
+  /// (important when the host is on mobile data).
+  Future<void> _applyCameraQuality(RTCRtpSender sender) async {
+    try {
+      final params = sender.parameters;
+      final encodings = params.encodings;
+      if (encodings == null || encodings.isEmpty) {
+        params.encodings = [RTCRtpEncoding(maxBitrate: 500000, maxFramerate: 20)];
+      } else {
+        for (final e in encodings) {
+          e.maxBitrate = 500000;
+          e.maxFramerate = 20;
+        }
+      }
+      await sender.setParameters(params);
+    } catch (_) {}
+  }
+
+  /// HOST: stop sending the camera and renegotiate so the viewer drops the tile.
+  Future<void> removeCameraTrack() async {
+    final sender = _cameraSender;
+    _cameraSender = null;
+    if (sender != null && _pc != null) {
+      try {
+        await _pc!.removeTrack(sender);
+      } catch (_) {}
+    }
+    await _stopCameraStream();
+    if (_pc != null) await _createAndSendOffer();
+  }
+
+  Future<void> _stopCameraStream() async {
+    final stream = _cameraStream;
+    _cameraStream = null;
+    if (stream == null) return;
+    for (final track in stream.getTracks()) {
+      await track.stop();
+    }
+    await stream.dispose();
+  }
+
   Future<void> _createAndSendOffer() async {
     final offer = await _pc!.createOffer();
     await _pc!.setLocalDescription(offer);
-    onLocalSignal?.call({'kind': 'offer', 'sdp': offer.sdp, 'type': offer.type});
+    onLocalSignal?.call({
+      'kind': 'offer',
+      'sdp': offer.sdp,
+      'type': offer.type,
+      // Tell the viewer which inbound stream is the camera presence track (null
+      // when the host isn't sharing their camera).
+      'cameraStreamId': _cameraStream?.id,
+    });
   }
 
   /// HOST: recover a dropped media path without re-pairing. Generates fresh ICE
@@ -164,6 +256,12 @@ class WebRtcService {
     await _ensurePeerConnection();
     switch (payload['kind']) {
       case 'offer':
+        // Learn which inbound stream is the camera BEFORE the tracks arrive.
+        final camId = payload['cameraStreamId'] as String?;
+        if (camId == null && _remoteCameraStreamId != null) {
+          onCameraRemoved?.call();
+        }
+        _remoteCameraStreamId = camId;
         await _pc!.setRemoteDescription(
           RTCSessionDescription(payload['sdp'] as String, payload['type'] as String),
         );
@@ -214,12 +312,15 @@ class WebRtcService {
     await _pc?.close();
     _dataChannel = null;
     _pc = null;
+    _cameraSender = null; // belonged to the closed pc; re-added in startAsHost
+    _remoteCameraStreamId = null;
     _remoteDescriptionSet = false;
     _pendingCandidates.clear();
   }
 
   Future<void> dispose() async {
     await stopLocalStream();
+    await _stopCameraStream();
     await resetPeer();
   }
 }

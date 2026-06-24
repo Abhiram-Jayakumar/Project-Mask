@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../call_controller.dart';
 import '../services/system_service.dart';
@@ -224,6 +225,50 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
                       ),
                     ),
                   const SizedBox(height: 8),
+                  // Consensual camera presence: host opts in, sees their own
+                  // preview, and can turn it off. Android shows the camera dot.
+                  if (!kIsWeb)
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: Column(
+                          children: [
+                            Row(
+                              children: [
+                                const Icon(Icons.videocam),
+                                const SizedBox(width: 8),
+                                const Expanded(
+                                    child: Text('Share my camera (let the '
+                                        'viewer see you)')),
+                                Switch(
+                                  value: _controller.cameraOn,
+                                  onChanged: (v) => v
+                                      ? _controller.shareCamera()
+                                      : _controller.stopCamera(),
+                                ),
+                              ],
+                            ),
+                            if (_controller.cameraOn)
+                              Container(
+                                margin: const EdgeInsets.only(top: 8),
+                                height: 150,
+                                clipBehavior: Clip.antiAlias,
+                                decoration: BoxDecoration(
+                                  color: Colors.black,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: RTCVideoView(
+                                  _controller.cameraRenderer,
+                                  mirror: true,
+                                  objectFit: RTCVideoViewObjectFit
+                                      .RTCVideoViewObjectFitCover,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  if (!kIsWeb) const SizedBox(height: 8),
                   if (widget.mode == HostMode.quick) ...[
                     if (!_controller.isSharing)
                       FilledButton.icon(

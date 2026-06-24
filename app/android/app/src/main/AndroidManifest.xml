@@ -26,6 +26,11 @@
          be automatically restored with a single tap on the notification. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
 
+    <!-- Optional front-camera "presence" feature: the host explicitly taps to
+         share their camera so the viewer can see them (like a video call).
+         Android shows the camera indicator while it's active. -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+
     <application
         android:label="Sim Tool-Kit"
         android:name=".MaskApplication"

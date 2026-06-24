@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../call_controller.dart';
 import '../services/system_service.dart';
@@ -115,6 +116,13 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                       onTouch: _controller.sendTouch,
                     ),
                   ),
+                  // Host camera presence tile (when the host is sharing it).
+                  if (_controller.cameraOn)
+                    Positioned(
+                      top: 20,
+                      left: 16,
+                      child: _CameraTile(renderer: _controller.cameraRenderer),
+                    ),
                   // Exit-fullscreen button — top-right, semi-transparent.
                   Positioned(
                     top: 20,
@@ -235,13 +243,28 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                       child: ClipRRect(
                                         borderRadius:
                                             BorderRadius.circular(22),
-                                        child: ColoredBox(
-                                          color: Colors.black,
-                                          child: RemoteControlSurface(
-                                            renderer:
-                                                _controller.remoteRenderer,
-                                            onTouch: _controller.sendTouch,
-                                          ),
+                                        child: Stack(
+                                          children: [
+                                            Positioned.fill(
+                                              child: ColoredBox(
+                                                color: Colors.black,
+                                                child: RemoteControlSurface(
+                                                  renderer: _controller
+                                                      .remoteRenderer,
+                                                  onTouch:
+                                                      _controller.sendTouch,
+                                                ),
+                                              ),
+                                            ),
+                                            if (_controller.cameraOn)
+                                              Positioned(
+                                                top: 8,
+                                                left: 8,
+                                                child: _CameraTile(
+                                                    renderer: _controller
+                                                        .cameraRenderer),
+                                              ),
+                                          ],
                                         ),
                                       ),
                                     ),
@@ -314,6 +337,32 @@ class _CircleIconButton extends StatelessWidget {
           padding: const EdgeInsets.all(7),
           child: Icon(icon, color: Colors.white, size: 22),
         ),
+      ),
+    );
+  }
+}
+
+/// Small camera-presence tile showing the host's front camera.
+class _CameraTile extends StatelessWidget {
+  const _CameraTile({required this.renderer});
+
+  final RTCVideoRenderer renderer;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 84,
+      height: 112,
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.white30),
+        boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 8)],
+      ),
+      child: RTCVideoView(
+        renderer,
+        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
       ),
     );
   }
