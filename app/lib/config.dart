@@ -14,20 +14,20 @@ bool get isMobileWeb =>
         defaultTargetPlatform == TargetPlatform.iOS);
 
 /// Default signaling server URL. Resolved in this order:
-///   1. `--dart-define=SIGNALING_URL=...` (used for release builds pointing at
-///      the deployed server), then
+///   1. `--dart-define=SIGNALING_URL=...` (overrides everything), then
 ///   2. on **web**, the page's own origin — because the web app is served BY the
 ///      signaling server, so same-origin "just works" in production, and then
-///   3. a local dev default (`127.0.0.1:3000`) for native.
+///   3. the deployed server, so plain `flutter run` from the IDE (no dart-define)
+///      connects to production by default.
 ///
-/// Dev tips: Android emulator → `http://10.0.2.2:3000`; USB phone →
-/// `adb reverse tcp:3000 tcp:3000` + `127.0.0.1:3000`; local web dev → pass
-/// `--dart-define=SIGNALING_URL=http://127.0.0.1:3000`. Always editable in the UI.
+/// Local-server dev: type the local URL in the UI (it's editable), or pass
+/// `--dart-define=SIGNALING_URL=http://127.0.0.1:3000` (USB phone also needs
+/// `adb reverse tcp:3000 tcp:3000`; Android emulator uses `http://10.0.2.2:3000`).
 String get defaultSignalingUrl {
   const fromEnv = String.fromEnvironment('SIGNALING_URL');
   if (fromEnv.isNotEmpty) return fromEnv;
   if (kIsWeb) return Uri.base.origin;
-  return 'http://127.0.0.1:3000';
+  return 'https://project-mask.onrender.com';
 }
 
 /// ICE servers for NAT traversal.
@@ -69,9 +69,16 @@ List<Map<String, dynamic>> get iceServers => [
 
 /// Screen-share video tuning (applied to the host's video sender).
 ///
-/// Screen content (sharp text) looks best with a high bitrate and a preference to
-/// keep RESOLUTION over framerate — by default WebRTC drops resolution to hold
-/// the framerate, which makes text blurry. 8 Mbps is comfortable on a LAN;
-/// WebRTC automatically adapts down on constrained networks.
-const int maxVideoBitrate = 8000000; // 8 Mbps
-const int maxVideoFramerate = 30;
+/// The encoder uses BALANCED degradation (see webrtc_service.dart), so on a
+/// constrained/relayed uplink — e.g. the host on MOBILE DATA — it scales the
+/// resolution down to fit the bandwidth, producing a smaller but CLEAN image
+/// instead of a full-resolution blur. On a fast LAN it stays at full resolution.
+///
+/// FRAMERATE is the main quality knob to trade by hand: fewer frames = more bits
+/// per frame = crisper text. 15 fps reads/operates well. Lower it (e.g. 10) for
+/// the sharpest stills on a weak/cellular link; raise it (24–30) only on a fast
+/// direct LAN where you want smoother motion. [maxVideoBitrate] is only a ceiling;
+/// congestion control sets the real rate (the cellular UPLOAD speed is the true
+/// limit when the host is on mobile data).
+const int maxVideoBitrate = 8000000; // 8 Mbps ceiling
+const int maxVideoFramerate = 15;

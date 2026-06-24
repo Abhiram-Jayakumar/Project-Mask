@@ -174,6 +174,7 @@ class CallController extends ChangeNotifier {
     _signaling.onDeviceArmed = (id) {
       deviceId = id;
       armed = true;
+      SessionStore.setArmedState(true); // persist so BootReceiver detects a reboot
       _addLog('Device armed — viewers can connect with the PIN');
       _setStatus(peerConnected
           ? 'Connected (peer-to-peer)'
@@ -331,6 +332,7 @@ class CallController extends ChangeNotifier {
   Future<void> disarmDevice() async {
     armed = false;
     _signaling.disarmDevice();
+    await SessionStore.setArmedState(false);
     await stopSharing();
     _addLog('Stopped allowing remote connections');
     _setStatus('Not allowing connections');
@@ -416,6 +418,7 @@ class CallController extends ChangeNotifier {
       if (armed) {
         armed = false;
         _signaling.disarmDevice();
+        await SessionStore.setArmedState(false);
       }
       if (isSharing) await _webrtc.stopLocalStream();
       await ScreenCaptureService.stopService();

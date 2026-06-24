@@ -11,15 +11,22 @@ import '../widgets/keep_alive_cards.dart';
 /// Host = the device being shared/controlled. In [HostMode.quick] it opens a
 /// one-off random session; in [HostMode.anytime] it shows a stable device ID +
 /// permanent PIN that viewers can use to connect at any time.
+///
+/// When [autoArm] is true (set by the boot-restore flow) the screen
+/// automatically calls [CallController.armDevice] as soon as signaling connects
+/// and a PIN is available — the user only needs to accept the system
+/// MediaProjection dialog.
 class HostScreen extends StatefulWidget {
   const HostScreen({
     super.key,
     required this.serverUrl,
     this.mode = HostMode.quick,
+    this.autoArm = false,
   });
 
   final String serverUrl;
   final HostMode mode;
+  final bool autoArm;
 
   @override
   State<HostScreen> createState() => _HostScreenState();
@@ -28,6 +35,7 @@ class HostScreen extends StatefulWidget {
 class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
   late final CallController _controller;
   bool _closing = false; // set true only when the user ends the session
+  VoidCallback? _autoArmListener; // non-null only while waiting to auto-arm
 
   @override
   void initState() {
@@ -39,6 +47,25 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
       hostMode: widget.mode,
     );
     _controller.start();
+    if (widget.autoArm && widget.mode == HostMode.anytime) {
+      _scheduleAutoArm();
+    }
+  }
+
+  /// Registers a one-shot listener that calls [CallController.armDevice] as
+  /// soon as signaling is connected and the PIN is available. Fires at most
+  /// once — it removes itself before calling armDevice.
+  void _scheduleAutoArm() {
+    _autoArmListener = () {
+      if (_controller.signalingConnected &&
+          _controller.hasPin &&
+          !_controller.armed) {
+        _controller.removeListener(_autoArmListener!);
+        _autoArmListener = null;
+        _controller.armDevice();
+      }
+    };
+    _controller.addListener(_autoArmListener!);
   }
 
   @override
@@ -63,6 +90,10 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    if (_autoArmListener != null) {
+      _controller.removeListener(_autoArmListener!);
+      _autoArmListener = null;
+    }
     WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
     super.dispose();
@@ -95,7 +126,8 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
           child: ListenableBuilder(
             listenable: _controller,
             builder: (context, _) {
-              return Column(
+              return SingleChildScrollView(
+                child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(_controller.status,
@@ -215,8 +247,12 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
                   ],
                   CloseSessionButton(onPressed: _closeSession),
                   const SizedBox(height: 8),
-                  Expanded(child: ConnectionPanel(controller: _controller)),
+                  SizedBox(
+                    height: 220,
+                    child: ConnectionPanel(controller: _controller),
+                  ),
                 ],
+              ),
               );
             },
           ),

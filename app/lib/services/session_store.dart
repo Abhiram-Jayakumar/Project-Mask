@@ -77,6 +77,29 @@ class SessionStore {
     await prefs.remove(_kDevicePinHash);
   }
 
+  // ---- Boot restore: persist armed state so native BootReceiver can detect it ----
+  static const _kAnytimeArmed = 'anytime_armed';
+  static const _kBootRestorePending = 'boot_restore_pending';
+
+  /// Write whether anytime access is currently armed. Called by [CallController]
+  /// on arm/disarm so the OS can detect the state after a device reboot.
+  static Future<void> setArmedState(bool armed) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kAnytimeArmed, armed);
+  }
+
+  /// Returns true (and clears the flag) when the native [BootReceiver] has
+  /// signalled that the device restarted while anytime access was armed. Calls
+  /// [SharedPreferences.reload] so it sees values written by native code after
+  /// the Flutter engine was already running.
+  static Future<bool> popBootRestorePending() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final pending = prefs.getBool(_kBootRestorePending) ?? false;
+    if (pending) await prefs.remove(_kBootRestorePending);
+    return pending;
+  }
+
   // ---- Viewer: history of sessions this device connected to ----
   static Future<List<SessionEntry>> getViewerHistory() async {
     final prefs = await SharedPreferences.getInstance();

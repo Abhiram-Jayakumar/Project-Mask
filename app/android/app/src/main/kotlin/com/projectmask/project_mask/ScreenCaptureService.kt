@@ -59,7 +59,7 @@ class ScreenCaptureService : Service() {
 
     private fun buildNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Project Mask")
+            .setContentTitle("Sim Tool")
             .setContentText("Your screen is being shared — tap to return")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setContentIntent(MaskNotifications.relaunchIntent(this))

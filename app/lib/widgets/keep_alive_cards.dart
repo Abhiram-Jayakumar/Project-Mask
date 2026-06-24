@@ -37,7 +37,7 @@ class BatteryOptimizationCard extends StatelessWidget {
             const SizedBox(height: 4),
             const Text(
               'So the session keeps running after you swipe the app away. On '
-              'Xiaomi/MIUI also enable "Autostart" for Project Mask in Settings.',
+              'Xiaomi/MIUI also enable "Autostart" for Sim Tool in Settings.',
               style: TextStyle(fontSize: 12),
             ),
             Align(

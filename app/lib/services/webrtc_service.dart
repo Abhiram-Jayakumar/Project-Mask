@@ -119,11 +119,15 @@ class WebRtcService {
         for (final encoding in encodings) {
           encoding.maxBitrate = maxVideoBitrate;
           encoding.maxFramerate = maxVideoFramerate;
-          encoding.scaleResolutionDownBy = 1.0;
+          // Don't pin scaleResolutionDownBy — let BALANCED adapt resolution to
+          // the available (cellular/relayed) bandwidth.
         }
       }
-      params.degradationPreference =
-          RTCDegradationPreference.MAINTAIN_RESOLUTION;
+      // BALANCED lets WebRTC scale resolution down to fit a constrained/relayed
+      // uplink (e.g. host on mobile data) — a smaller but CLEAN image is far more
+      // legible than a full-resolution one starved of bitrate. On a fast LAN it
+      // stays at full resolution anyway.
+      params.degradationPreference = RTCDegradationPreference.BALANCED;
       await sender.setParameters(params);
     } catch (_) {
       // Keep default encoder settings if tuning isn't supported.

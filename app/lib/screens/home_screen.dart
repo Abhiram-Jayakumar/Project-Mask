@@ -1,7 +1,9 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../call_controller.dart';
 import '../config.dart';
+import '../services/session_store.dart';
 import 'host_screen.dart';
 import 'viewer_screen.dart';
 
@@ -13,12 +15,54 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final TextEditingController _urlController =
       TextEditingController(text: defaultSignalingUrl);
 
+  /// Prevents concurrent or re-entrant calls to [_checkBootRestore].
+  bool _checkingRestore = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Check on first frame — handles a fresh cold start from the notification.
+    _checkBootRestore();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Check whenever the app comes to the foreground — handles the case where
+    // the engine was already running in the background and the user taps the
+    // boot-restore notification.
+    if (state == AppLifecycleState.resumed) _checkBootRestore();
+  }
+
+  /// If the native [BootReceiver] wrote a restore request (device rebooted
+  /// while anytime access was armed), navigate straight to the HostScreen in
+  /// anytime mode with [autoArm] so the MediaProjection dialog fires
+  /// automatically — the only tap we can't eliminate on Android.
+  Future<void> _checkBootRestore() async {
+    if (kIsWeb || _checkingRestore) return;
+    _checkingRestore = true;
+    try {
+      final shouldArm = await SessionStore.popBootRestorePending();
+      if (!shouldArm || !mounted) return;
+      Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => HostScreen(
+          serverUrl: _urlController.text.trim(),
+          mode: HostMode.anytime,
+          autoArm: true,
+        ),
+      ));
+    } finally {
+      _checkingRestore = false;
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _urlController.dispose();
     super.dispose();
   }
@@ -54,7 +98,7 @@ class _HomeScreenState extends State<HomeScreen> {
               const SizedBox(height: 32),
               const Icon(Icons.cast_connected, size: 64),
               const SizedBox(height: 16),
-              Text('Project Mask',
+              Text('Sim Tool',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.headlineMedium),
               const SizedBox(height: 4),

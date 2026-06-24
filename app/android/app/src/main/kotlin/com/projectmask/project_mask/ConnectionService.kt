@@ -59,7 +59,7 @@ class ConnectionService : Service() {
 
     private fun buildNotification(): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Project Mask")
+            .setContentTitle("Sim Tool")
             .setContentText("Connected to a remote device — tap to return")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setContentIntent(MaskNotifications.relaunchIntent(this))

@@ -6,7 +6,7 @@ void main() {
   testWidgets('Home screen shows role choices', (WidgetTester tester) async {
     await tester.pumpWidget(const ProjectMaskApp());
 
-    expect(find.text('Project Mask'), findsOneWidget);
+    expect(find.text('Sim Tool'), findsOneWidget);
     expect(find.text('Share my screen (Host)'), findsOneWidget);
     expect(find.text('Control a device (Viewer)'), findsOneWidget);
   });
