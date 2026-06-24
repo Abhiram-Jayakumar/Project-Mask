@@ -67,6 +67,19 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
     setState(() => _fullscreen = false);
   }
 
+  /// Show/hide the host camera. Toggling on ASKS the host to start the camera
+  /// (so it's only live while actually being watched); toggling off stops it.
+  void _toggleHostCam() {
+    final next = !_showHostCam;
+    setState(() => _showHostCam = next);
+    _controller.requestHostCamera(next);
+  }
+
+  void _closeHostCam() {
+    setState(() => _showHostCam = false);
+    _controller.requestHostCamera(false);
+  }
+
   @override
   void dispose() {
     // Always restore system UI when leaving the viewer.
@@ -123,7 +136,7 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                     _DraggableCameraTile(
                       renderer: _controller.cameraRenderer,
                       bounds: MediaQuery.of(context).size,
-                      onClose: () => setState(() => _showHostCam = false),
+                      onClose: _closeHostCam,
                     ),
                   // Top-right controls: view-host toggle + exit fullscreen.
                   Positioned(
@@ -131,13 +144,12 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                     right: 16,
                     child: Row(
                       children: [
-                        if (_controller.cameraOn) ...[
+                        if (_controller.cameraAvailable) ...[
                           _CircleIconButton(
                             icon: _showHostCam
                                 ? Icons.videocam_off
                                 : Icons.videocam,
-                            onTap: () =>
-                                setState(() => _showHostCam = !_showHostCam),
+                            onTap: _toggleHostCam,
                           ),
                           const SizedBox(width: 8),
                         ],
@@ -280,8 +292,7 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                                 bounds: Size(
                                                     frameW - 12, frameH - 12),
                                                 tileSize: const Size(72, 96),
-                                                onClose: () => setState(() =>
-                                                    _showHostCam = false),
+                                                onClose: _closeHostCam,
                                               ),
                                           ],
                                         ),
@@ -294,13 +305,12 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        if (_controller.cameraOn) ...[
+                                        if (_controller.cameraAvailable) ...[
                                           _CircleIconButton(
                                             icon: _showHostCam
                                                 ? Icons.videocam_off
                                                 : Icons.videocam,
-                                            onTap: () => setState(() =>
-                                                _showHostCam = !_showHostCam),
+                                            onTap: _toggleHostCam,
                                           ),
                                           const SizedBox(width: 8),
                                         ],

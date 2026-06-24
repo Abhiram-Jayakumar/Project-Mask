@@ -21,4 +21,12 @@ class ScreenCaptureService {
     if (kIsWeb) return;
     await _channel.invokeMethod('stopService');
   }
+
+  /// Add ([on]=true) or remove the camera foreground-service type from the
+  /// running capture service, so the host's camera can be opened on-demand even
+  /// while backgrounded. Call before/after getUserMedia for the camera.
+  static Future<void> setCamera(bool on) async {
+    if (kIsWeb) return;
+    await _channel.invokeMethod('setCamera', {'on': on});
+  }
 }

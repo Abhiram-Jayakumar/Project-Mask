@@ -29,4 +29,11 @@ class SystemService {
     if (kIsWeb) return;
     await _channel.invokeMethod('moveTaskToBack');
   }
+
+  /// Prompt for the camera permission once (at setup, while the host is present)
+  /// so the on-demand camera never has to disturb the host again.
+  static Future<void> requestCameraPermission() async {
+    if (kIsWeb) return;
+    await _channel.invokeMethod('requestCameraPermission');
+  }
 }

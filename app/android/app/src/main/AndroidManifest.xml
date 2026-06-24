@@ -14,6 +14,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- Lets the capture service carry the camera FGS type so the host's camera
+         can be opened on-demand while the app is backgrounded. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
 
     <!-- Generic keep-alive foreground service for the viewer role (connectedDevice
          type is satisfied by the CHANGE_NETWORK_STATE permission above). -->
@@ -65,7 +68,7 @@
             android:name=".ScreenCaptureService"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="mediaProjection" />
+            android:foregroundServiceType="mediaProjection|camera" />
 
         <!-- Generic keep-alive foreground service for the viewer role; also
              survives task removal so the control link isn't dropped. -->

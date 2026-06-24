@@ -39,6 +39,17 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /** Prompt for the CAMERA permission once (at setup) so the on-demand camera
+     *  never needs to disturb the host later. No-op if already granted. */
+    fun requestCameraPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            checkSelfPermission(Manifest.permission.CAMERA) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), 1002)
+        }
+    }
+
     override fun onDestroy() {
         if (current === this) current = null
         super.onDestroy()

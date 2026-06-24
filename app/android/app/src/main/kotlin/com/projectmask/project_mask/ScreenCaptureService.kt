@@ -1,48 +1,86 @@
 package com.projectmask.project_mask
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 
 /**
- * Foreground service that exists solely so Android lets us hold a MediaProjection
- * while screen sharing. flutter_webrtc creates the projection itself but does NOT
- * run a foreground service, and Android 14+ throws a SecurityException from
- * getMediaProjection() unless a mediaProjection-typed FGS is already running.
+ * Foreground service that exists so Android lets us hold a MediaProjection while
+ * screen sharing. It can ALSO carry the `camera` foreground-service type so the
+ * host's front camera can be opened on-demand even while the app is backgrounded
+ * (Android otherwise blocks background camera access).
  *
- * Lifecycle: Dart starts this service (via MethodChannel) BEFORE calling
- * getDisplayMedia, and stops it when sharing ends.
+ * Safety: the camera type is only added when the CAMERA runtime permission is
+ * actually granted — otherwise `startForeground` with a camera type would throw
+ * and break screen sharing. If it isn't granted we silently fall back to
+ * mediaProjection-only, so the screen share is never at risk.
+ *
+ * Lifecycle: Dart starts this (via MethodChannel) BEFORE getDisplayMedia and
+ * stops it when sharing ends. [updateCameraType] flips the camera type on/off
+ * from the running instance (no fresh start, so no background-start limits).
  */
 class ScreenCaptureService : Service() {
 
     companion object {
         private const val CHANNEL_ID = "project_mask_screen_capture"
         private const val NOTIFICATION_ID = 1001
+
+        /** The running service, or null when not sharing. */
+        @Volatile
+        var instance: ScreenCaptureService? = null
     }
+
+    private var cameraOn = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        instance = this
         createNotificationChannel()
-        val notification = buildNotification()
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
+        startForegroundWithType()
         return START_NOT_STICKY
+    }
+
+    /** Add/remove the camera FGS type from the already-running service. */
+    fun updateCameraType(on: Boolean) {
+        cameraOn = on
+        startForegroundWithType()
+    }
+
+    private fun hasCameraPermission(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            checkSelfPermission(Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+
+    private fun startForegroundWithType() {
+        val notification = buildNotification()
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
+                var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                // Only add the camera type when the permission is granted, else
+                // startForeground throws and would kill the screen share.
+                if (cameraOn && hasCameraPermission()) {
+                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+                }
+                startForeground(NOTIFICATION_ID, notification, type)
+            }
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+                )
+            else -> startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun createNotificationChannel() {
@@ -69,6 +107,7 @@ class ScreenCaptureService : Service() {
     }
 
     override fun onDestroy() {
+        instance = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {

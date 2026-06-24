@@ -34,6 +34,13 @@ object MaskChannels {
                     app.stopService(Intent(app, ScreenCaptureService::class.java))
                     result.success(true)
                 }
+                "setCamera" -> {
+                    // Flip the camera FGS type on the running capture service so
+                    // the front camera can be opened on-demand while backgrounded.
+                    val on = call.argument<Boolean>("on") ?: false
+                    ScreenCaptureService.instance?.updateCameraType(on)
+                    result.success(ScreenCaptureService.instance != null)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -91,6 +98,12 @@ object MaskChannels {
                     } else {
                         result.success(false)
                     }
+                }
+                "requestCameraPermission" -> {
+                    // Needs the Activity (foreground) to show the system dialog.
+                    // Done once at setup so on-demand camera never re-prompts.
+                    MainActivity.current?.requestCameraPermission()
+                    result.success(MainActivity.current != null)
                 }
                 else -> result.notImplemented()
             }

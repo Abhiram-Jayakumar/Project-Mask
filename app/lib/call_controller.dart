@@ -38,9 +38,16 @@ class CallController extends ChangeNotifier {
   /// Renders the remote screen on the viewer.
   final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
 
-  /// HOST: local front-camera self-preview. VIEWER: the host's camera presence
-  /// feed (shown in a small tile). Empty until the host shares their camera.
+  /// HOST: local front-camera self-preview. VIEWER: the host's camera feed.
   final RTCVideoRenderer cameraRenderer = RTCVideoRenderer();
+  // HOST: cameraAllowed = the user permitted sharing (a toggle); the camera only
+  // actually turns on (cameraActive) WHEN the viewer asks to look — so the OS
+  // camera indicator only appears while it's genuinely being watched.
+  bool cameraAllowed = false;
+  bool cameraActive = false;
+  // VIEWER: cameraAvailable = the host permits it (show the View-host button);
+  // cameraOn = a camera track is actually arriving (show the tile).
+  bool cameraAvailable = false;
   bool cameraOn = false;
 
   String status = 'Idle';
@@ -230,6 +237,13 @@ class CallController extends ChangeNotifier {
     _signaling.onPeerLeft = () {
       dataChannelOpen = false;
       peerConnected = false;
+      // HOST: viewer's gone — stop the camera so it isn't left running.
+      if (role == Role.host && cameraActive) _stopCameraInternal();
+      if (role == Role.viewer) {
+        cameraAvailable = false;
+        cameraOn = false;
+        cameraRenderer.srcObject = null;
+      }
       _addLog('Peer left');
       _setStatus('Peer disconnected');
     };
@@ -266,8 +280,13 @@ class CallController extends ChangeNotifier {
     _webrtc.onDataChannelOpen = (open) {
       dataChannelOpen = open;
       _addLog('Data channel ${open ? 'OPEN' : 'closed'}');
+      // HOST: tell the (re)connected viewer whether the camera is available.
+      if (open && role == Role.host) _signalCameraAvailability();
     };
     _webrtc.onDataMessage = (text) {
+      // Camera control messages (cheap prefix check first so touch floods skip
+      // the JSON decode).
+      if (_handleCameraMessage(text)) return;
       // HOST: touch JSON is forwarded to the accessibility service for injection
       // (and not logged, to avoid flooding the log with move events).
       if (role == Role.host && _injectGesture(text)) return;
@@ -352,7 +371,8 @@ class CallController extends ChangeNotifier {
     armed = false;
     _signaling.disarmDevice();
     await SessionStore.setArmedState(false);
-    if (cameraOn) await stopCamera();
+    cameraAllowed = false;
+    if (cameraActive) await _stopCameraInternal();
     await stopSharing();
     _addLog('Stopped allowing remote connections');
     _setStatus('Not allowing connections');
@@ -419,35 +439,101 @@ class CallController extends ChangeNotifier {
     return true;
   }
 
-  /// HOST: share the front camera as a "presence" tile so the viewer can see
-  /// you're there (consensual, like a video call). You explicitly enable it,
-  /// see your own preview, and Android shows the camera indicator the whole time.
-  Future<void> shareCamera() async {
-    if (cameraOn || kIsWeb) return;
+  /// HOST: allow the viewer to view your camera. This does NOT turn the camera
+  /// on — it only advertises availability. The camera (and the OS indicator)
+  /// starts only when the viewer actually asks to look ([_startCameraInternal]).
+  Future<void> allowCamera() async {
+    if (kIsWeb) return;
+    cameraAllowed = true;
+    // Grant the camera permission NOW (host is here), so the on-demand camera
+    // never has to prompt the host again — including while backgrounded.
+    SystemService.requestCameraPermission();
+    _addLog('Camera available — turns on only when the viewer looks');
+    _signalCameraAvailability();
+    notifyListeners();
+  }
+
+  /// HOST: revoke camera sharing (and stop it if it's live).
+  Future<void> disallowCamera() async {
+    cameraAllowed = false;
+    if (cameraActive) await _stopCameraInternal();
+    _signalCameraAvailability();
+    notifyListeners();
+  }
+
+  void _signalCameraAvailability() {
+    if (dataChannelOpen) {
+      _webrtc.sendData(jsonEncode({'t': 'camavail', 'on': cameraAllowed}));
+    }
+  }
+
+  /// HOST: actually open the camera — only called when the viewer requests it.
+  Future<void> _startCameraInternal() async {
+    if (cameraActive || !cameraAllowed || kIsWeb) return;
     try {
+      // Add the camera FGS type FIRST so the camera can open even while the app
+      // is backgrounded (Android blocks background camera otherwise).
+      await ScreenCaptureService.setCamera(true);
       final stream = await navigator.mediaDevices.getUserMedia({
         'audio': false,
         'video': {'facingMode': 'user'},
       });
       cameraRenderer.srcObject = stream; // local self-preview
       await _webrtc.addCameraTrack(stream);
-      cameraOn = true;
-      _addLog('Camera shared');
+      cameraActive = true;
+      _addLog('Camera on (viewer is watching)');
       notifyListeners();
     } catch (e) {
+      await ScreenCaptureService.setCamera(false); // revert on failure
       _addLog('Camera failed: $e');
-      _setStatus('Camera permission needed');
     }
   }
 
-  /// HOST: stop sharing the camera.
-  Future<void> stopCamera() async {
-    if (!cameraOn) return;
+  /// HOST: close the camera (viewer stopped looking / revoked).
+  Future<void> _stopCameraInternal() async {
+    if (!cameraActive) return;
     cameraRenderer.srcObject = null;
     await _webrtc.removeCameraTrack();
-    cameraOn = false;
-    _addLog('Camera stopped');
+    await ScreenCaptureService.setCamera(false); // drop the camera FGS type
+    cameraActive = false;
+    _addLog('Camera off');
     notifyListeners();
+  }
+
+  /// VIEWER: ask the host to start ([want]=true) or stop sending their camera.
+  void requestHostCamera(bool want) {
+    if (!dataChannelOpen) return;
+    _webrtc.sendData(jsonEncode({'t': 'cam', 'want': want}));
+  }
+
+  /// Handle the camera control messages exchanged over the data channel.
+  /// HOST receives `{"t":"cam","want":bool}`; VIEWER receives
+  /// `{"t":"camavail","on":bool}`. Returns true if it was such a message.
+  bool _handleCameraMessage(String text) {
+    if (!text.contains('"cam')) return false; // fast path past touch events
+    final Map<String, dynamic> data;
+    try {
+      final decoded = jsonDecode(text);
+      if (decoded is! Map) return false;
+      data = Map<String, dynamic>.from(decoded);
+    } catch (_) {
+      return false;
+    }
+    final t = data['t'];
+    if (role == Role.host && t == 'cam') {
+      (data['want'] == true) ? _startCameraInternal() : _stopCameraInternal();
+      return true;
+    }
+    if (role == Role.viewer && t == 'camavail') {
+      cameraAvailable = data['on'] == true;
+      if (!cameraAvailable) {
+        cameraOn = false;
+        cameraRenderer.srcObject = null;
+      }
+      notifyListeners();
+      return true;
+    }
+    return false;
   }
 
   /// HOST: stop capturing and tear down the foreground service.

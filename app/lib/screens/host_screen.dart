@@ -238,17 +238,29 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
                                 const Icon(Icons.videocam),
                                 const SizedBox(width: 8),
                                 const Expanded(
-                                    child: Text('Share my camera (let the '
-                                        'viewer see you)')),
+                                    child: Text('Let the viewer see my camera')),
                                 Switch(
-                                  value: _controller.cameraOn,
+                                  value: _controller.cameraAllowed,
                                   onChanged: (v) => v
-                                      ? _controller.shareCamera()
-                                      : _controller.stopCamera(),
+                                      ? _controller.allowCamera()
+                                      : _controller.disallowCamera(),
                                 ),
                               ],
                             ),
-                            if (_controller.cameraOn)
+                            if (_controller.cameraAllowed &&
+                                !_controller.cameraActive)
+                              const Padding(
+                                padding: EdgeInsets.only(top: 4),
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: Text(
+                                    'Camera stays off until the viewer chooses '
+                                    'to look.',
+                                    style: TextStyle(fontSize: 12),
+                                  ),
+                                ),
+                              ),
+                            if (_controller.cameraActive)
                               Container(
                                 margin: const EdgeInsets.only(top: 8),
                                 height: 150,
