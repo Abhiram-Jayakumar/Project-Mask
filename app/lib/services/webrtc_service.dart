@@ -17,11 +17,15 @@ class WebRtcService {
   MediaStream? _localStream;
 
   // HOST: optional front-camera "presence" stream, sent as a SECOND video track
-  // alongside the screen. VIEWER: the inbound stream id we've been told is the
-  // camera (signaled on the offer) so onTrack can route it to the camera tile.
+  // alongside the screen.
   MediaStream? _cameraStream;
   RTCRtpSender? _cameraSender;
-  String? _remoteCameraStreamId;
+  // VIEWER: the id of the FIRST remote stream (the screen). The host always
+  // shares the screen before the camera, so anything that isn't this stream is
+  // the camera — far more reliable than matching signaled stream ids, which
+  // libwebrtc doesn't preserve across the connection here.
+  String? _screenStreamId;
+  bool _remoteCameraPresent = false;
 
   // ICE candidates can arrive before the remote description is set; buffer them.
   bool _remoteDescriptionSet = false;
@@ -60,12 +64,13 @@ class WebRtcService {
     pc.onTrack = (event) {
       if (event.streams.isEmpty) return;
       final stream = event.streams.first;
-      // Route the camera presence track to its own renderer; everything else is
-      // the screen. The camera stream id is signaled on the offer.
-      if (_remoteCameraStreamId != null && stream.id == _remoteCameraStreamId) {
-        onCameraStream?.call(stream);
-      } else {
+      // First remote stream = the screen (always shared first). Any other
+      // stream is the camera presence feed → its own renderer/tile.
+      if (_screenStreamId == null || stream.id == _screenStreamId) {
+        _screenStreamId ??= stream.id;
         onRemoteStream?.call(stream);
+      } else {
+        onCameraStream?.call(stream);
       }
     };
     // Viewer side receives the host-created channel here.
@@ -256,12 +261,14 @@ class WebRtcService {
     await _ensurePeerConnection();
     switch (payload['kind']) {
       case 'offer':
-        // Learn which inbound stream is the camera BEFORE the tracks arrive.
-        final camId = payload['cameraStreamId'] as String?;
-        if (camId == null && _remoteCameraStreamId != null) {
+        // The host flags whether its camera is on. We use onTrack to ROUTE the
+        // camera stream, and this flag to know when it's turned OFF (no track
+        // removal event fires) so the viewer can drop the tile.
+        final camPresent = payload['cameraStreamId'] != null;
+        if (!camPresent && _remoteCameraPresent) {
           onCameraRemoved?.call();
         }
-        _remoteCameraStreamId = camId;
+        _remoteCameraPresent = camPresent;
         await _pc!.setRemoteDescription(
           RTCSessionDescription(payload['sdp'] as String, payload['type'] as String),
         );
@@ -313,7 +320,8 @@ class WebRtcService {
     _dataChannel = null;
     _pc = null;
     _cameraSender = null; // belonged to the closed pc; re-added in startAsHost
-    _remoteCameraStreamId = null;
+    _screenStreamId = null; // re-learned from the first track after reconnect
+    _remoteCameraPresent = false;
     _remoteDescriptionSet = false;
     _pendingCandidates.clear();
   }

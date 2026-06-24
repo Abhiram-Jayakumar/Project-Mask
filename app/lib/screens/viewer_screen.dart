@@ -29,6 +29,7 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
   final TextEditingController _pinController = TextEditingController();
   bool _closing = false;    // set true only when the user ends the session
   bool _fullscreen = false; // true → video fills screen, system bars hidden
+  bool _showHostCam = false; // viewer chose to view the host's camera tile
 
   @override
   void initState() {
@@ -116,20 +117,35 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                       onTouch: _controller.sendTouch,
                     ),
                   ),
-                  // Host camera presence tile (when the host is sharing it).
-                  if (_controller.cameraOn)
-                    Positioned(
-                      top: 20,
-                      left: 16,
-                      child: _CameraTile(renderer: _controller.cameraRenderer),
+                  // Host camera presence — the viewer opens it on demand and it
+                  // floats as a draggable window (never covers the screen).
+                  if (_controller.cameraOn && _showHostCam)
+                    _DraggableCameraTile(
+                      renderer: _controller.cameraRenderer,
+                      bounds: MediaQuery.of(context).size,
+                      onClose: () => setState(() => _showHostCam = false),
                     ),
-                  // Exit-fullscreen button — top-right, semi-transparent.
+                  // Top-right controls: view-host toggle + exit fullscreen.
                   Positioned(
                     top: 20,
                     right: 16,
-                    child: _CircleIconButton(
-                      icon: Icons.fullscreen_exit,
-                      onTap: _exitFullscreen,
+                    child: Row(
+                      children: [
+                        if (_controller.cameraOn) ...[
+                          _CircleIconButton(
+                            icon: _showHostCam
+                                ? Icons.videocam_off
+                                : Icons.videocam,
+                            onTap: () =>
+                                setState(() => _showHostCam = !_showHostCam),
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        _CircleIconButton(
+                          icon: Icons.fullscreen_exit,
+                          onTap: _exitFullscreen,
+                        ),
+                      ],
                     ),
                   ),
                 ],
@@ -256,25 +272,43 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                                 ),
                                               ),
                                             ),
-                                            if (_controller.cameraOn)
-                                              Positioned(
-                                                top: 8,
-                                                left: 8,
-                                                child: _CameraTile(
-                                                    renderer: _controller
-                                                        .cameraRenderer),
+                                            if (_controller.cameraOn &&
+                                                _showHostCam)
+                                              _DraggableCameraTile(
+                                                renderer:
+                                                    _controller.cameraRenderer,
+                                                bounds: Size(
+                                                    frameW - 12, frameH - 12),
+                                                tileSize: const Size(72, 96),
+                                                onClose: () => setState(() =>
+                                                    _showHostCam = false),
                                               ),
                                           ],
                                         ),
                                       ),
                                     ),
                                   ),
-                                  // Enter-fullscreen button overlaid on frame.
+                                  // Overlay controls: view-host toggle + fullscreen.
                                   Padding(
                                     padding: const EdgeInsets.all(10),
-                                    child: _CircleIconButton(
-                                      icon: Icons.fullscreen,
-                                      onTap: _enterFullscreen,
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (_controller.cameraOn) ...[
+                                          _CircleIconButton(
+                                            icon: _showHostCam
+                                                ? Icons.videocam_off
+                                                : Icons.videocam,
+                                            onTap: () => setState(() =>
+                                                _showHostCam = !_showHostCam),
+                                          ),
+                                          const SizedBox(width: 8),
+                                        ],
+                                        _CircleIconButton(
+                                          icon: Icons.fullscreen,
+                                          onTap: _enterFullscreen,
+                                        ),
+                                      ],
                                     ),
                                   ),
                                 ],
@@ -342,7 +376,7 @@ class _CircleIconButton extends StatelessWidget {
   }
 }
 
-/// Small camera-presence tile showing the host's front camera.
+/// Camera-presence tile showing the host's front camera. Fills its parent.
 class _CameraTile extends StatelessWidget {
   const _CameraTile({required this.renderer});
 
@@ -350,19 +384,89 @@ class _CameraTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 84,
-      height: 112,
-      clipBehavior: Clip.antiAlias,
+    return DecoratedBox(
       decoration: BoxDecoration(
         color: Colors.black,
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: Colors.white30),
         boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 8)],
       ),
-      child: RTCVideoView(
-        renderer,
-        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: RTCVideoView(
+          renderer,
+          objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+        ),
+      ),
+    );
+  }
+}
+
+/// A draggable, closable floating window for the host camera. Defaults to the
+/// bottom-right of [bounds] and stays within them. Must be a direct child of a
+/// Stack (it returns a [Positioned]).
+class _DraggableCameraTile extends StatefulWidget {
+  const _DraggableCameraTile({
+    required this.renderer,
+    required this.bounds,
+    required this.onClose,
+    this.tileSize = const Size(96, 128),
+  });
+
+  final RTCVideoRenderer renderer;
+  final Size bounds;
+  final VoidCallback onClose;
+  final Size tileSize;
+
+  @override
+  State<_DraggableCameraTile> createState() => _DraggableCameraTileState();
+}
+
+class _DraggableCameraTileState extends State<_DraggableCameraTile> {
+  Offset? _pos;
+
+  double _clamp(double v, double max) => v.clamp(0.0, max < 0 ? 0.0 : max);
+
+  @override
+  Widget build(BuildContext context) {
+    final w = widget.tileSize.width;
+    final h = widget.tileSize.height;
+    _pos ??= Offset(
+      _clamp(widget.bounds.width - w - 8, widget.bounds.width - w),
+      _clamp(widget.bounds.height - h - 8, widget.bounds.height - h),
+    );
+    return Positioned(
+      left: _pos!.dx,
+      top: _pos!.dy,
+      child: GestureDetector(
+        onPanUpdate: (d) => setState(() {
+          _pos = Offset(
+            _clamp(_pos!.dx + d.delta.dx, widget.bounds.width - w),
+            _clamp(_pos!.dy + d.delta.dy, widget.bounds.height - h),
+          );
+        }),
+        child: SizedBox(
+          width: w,
+          height: h,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Positioned.fill(child: _CameraTile(renderer: widget.renderer)),
+              Positioned(
+                top: -8,
+                right: -8,
+                child: GestureDetector(
+                  onTap: widget.onClose,
+                  child: const CircleAvatar(
+                    radius: 11,
+                    backgroundColor: Colors.black87,
+                    child: Icon(Icons.close, size: 14, color: Colors.white),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
