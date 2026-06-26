@@ -5,8 +5,8 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'config.dart';
 import 'services/connection_service.dart';
+import 'services/file_access_service.dart';
 import 'services/pin_crypto.dart';
-import 'services/remote_control_service.dart';
 import 'services/screen_capture_service.dart';
 import 'services/session_store.dart';
 import 'services/signaling_service.dart';
@@ -50,6 +50,26 @@ class CallController extends ChangeNotifier {
   bool cameraAvailable = false;
   bool cameraOn = false;
 
+  /// VIEWER: a hidden renderer that actually PLAYS the host's mic audio (web
+  /// needs a media element to output remote audio). Mirrors the camera model.
+  final RTCVideoRenderer audioRenderer = RTCVideoRenderer();
+  bool micAllowed = false; // HOST permitted listening
+  bool micActive = false; // HOST mic genuinely open
+  bool micAvailable = false; // VIEWER: host permits listening
+  bool micOn = false; // VIEWER: receiving the mic audio
+  bool screenRequested = false; // HOST: the viewer asked to see the screen
+
+  // File access — host selects folders the viewer is allowed to browse.
+  List<String> permittedFolders = [];   // HOST: folders shared with viewer
+  bool filesAvailable = false;           // VIEWER: host has shared folders
+  List<String> availableFolders = [];    // VIEWER: folder list from host
+  // Last file-browse response received from the host (viewer side). Both are
+  // cleared to null after the panel reads them via [takeFileListResult] /
+  // [takeFileDataResult] / [takeFileErrorResult].
+  ({String path, List<FileEntry> entries})? fileListResult;
+  ({String path, String text})? fileDataResult;
+  ({String path, String error})? fileErrorResult;
+
   String status = 'Idle';
   String? sessionId;
   String? sessionPin;
@@ -57,7 +77,6 @@ class CallController extends ChangeNotifier {
   bool dataChannelOpen = false;
   bool peerConnected = false;
   bool isSharing = false;
-  bool accessibilityEnabled = false;
   bool ignoringBatteryOptimizations = true; // true = exempt (or web/unsupported)
 
   // Anytime access (permanent PIN) — host, anytime mode only.
@@ -89,8 +108,8 @@ class CallController extends ChangeNotifier {
   Future<void> start() async {
     await remoteRenderer.initialize();
     await cameraRenderer.initialize();
+    await audioRenderer.initialize();
     _wireCallbacks();
-    if (role == Role.host) await refreshAccessibility();
     if (role == Role.host && hostMode == HostMode.anytime) {
       await _loadDeviceIdentity();
     }
@@ -109,18 +128,18 @@ class CallController extends ChangeNotifier {
       _pinHash = stored.hash;
       hasPin = true;
     }
+    // Restore the host's camera/mic "allow" choices so a reboot/re-arm doesn't
+    // require re-toggling them (the OS camera/mic permissions already persist).
+    final mediaPrefs = await SessionStore.getMediaPrefs();
+    cameraAllowed = mediaPrefs.camera;
+    micAllowed = mediaPrefs.mic;
+    permittedFolders = await SessionStore.getPermittedFolders();
     notifyListeners();
   }
 
-  /// HOST: re-check whether the accessibility service is enabled (call on resume
-  /// after the user returns from the system settings screen).
-  Future<void> refreshAccessibility() async {
-    accessibilityEnabled = await RemoteControlService.isAccessibilityEnabled();
-    notifyListeners();
+  void _persistMediaPrefs() {
+    SessionStore.setMediaPrefs(camera: cameraAllowed, mic: micAllowed);
   }
-
-  void openAccessibilitySettings() =>
-      RemoteControlService.openAccessibilitySettings();
 
   /// Re-check whether the app is exempt from battery optimization. A session can
   /// only reliably survive the app being swiped off recents when it is. Call on
@@ -237,12 +256,21 @@ class CallController extends ChangeNotifier {
     _signaling.onPeerLeft = () {
       dataChannelOpen = false;
       peerConnected = false;
-      // HOST: viewer's gone — stop the camera so it isn't left running.
+      // HOST: viewer's gone — stop camera/mic so they aren't left running.
       if (role == Role.host && cameraActive) _stopCameraInternal();
+      if (role == Role.host && micActive) _stopMicInternal();
       if (role == Role.viewer) {
         cameraAvailable = false;
         cameraOn = false;
         cameraRenderer.srcObject = null;
+        micAvailable = false;
+        micOn = false;
+        audioRenderer.srcObject = null;
+        filesAvailable = false;
+        availableFolders = [];
+        fileListResult = null;
+        fileDataResult = null;
+        fileErrorResult = null;
       }
       _addLog('Peer left');
       _setStatus('Peer disconnected');
@@ -280,21 +308,26 @@ class CallController extends ChangeNotifier {
     _webrtc.onDataChannelOpen = (open) {
       dataChannelOpen = open;
       _addLog('Data channel ${open ? 'OPEN' : 'closed'}');
-      // HOST: tell the (re)connected viewer whether the camera is available.
-      if (open && role == Role.host) _signalCameraAvailability();
+      // HOST: tell the (re)connected viewer what's available.
+      if (open && role == Role.host) {
+        _signalCameraAvailability();
+        _signalMicAvailability();
+        _signalFoldersAvailability();
+      }
     };
     _webrtc.onDataMessage = (text) {
-      // Camera control messages (cheap prefix check first so touch floods skip
-      // the JSON decode).
-      if (_handleCameraMessage(text)) return;
-      // HOST: touch JSON is forwarded to the accessibility service for injection
-      // (and not logged, to avoid flooding the log with move events).
-      if (role == Role.host && _injectGesture(text)) return;
+      // Camera/mic control messages (the only data-channel traffic now).
+      if (_handleMediaMessage(text)) return;
       _addLog('Received: $text');
     };
     _webrtc.onRemoteStream = (stream) {
       remoteRenderer.srcObject = stream;
-      _addLog('Remote stream attached');
+      _addLog('Remote screen attached');
+      notifyListeners();
+    };
+    _webrtc.onScreenRemoved = () {
+      remoteRenderer.srcObject = null;
+      _addLog('Host stopped screen sharing');
       notifyListeners();
     };
     _webrtc.onCameraStream = (stream) {
@@ -308,6 +341,20 @@ class CallController extends ChangeNotifier {
       cameraRenderer.srcObject = null;
       cameraOn = false;
       _addLog('Host camera off');
+      notifyListeners();
+    };
+    _webrtc.onMicStream = (stream) {
+      // VIEWER: host mic audio arrived — attach to the hidden renderer so it
+      // actually plays (needed on web).
+      audioRenderer.srcObject = stream;
+      micOn = true;
+      _addLog('Host mic on');
+      notifyListeners();
+    };
+    _webrtc.onMicRemoved = () {
+      audioRenderer.srcObject = null;
+      micOn = false;
+      _addLog('Host mic off');
       notifyListeners();
     };
   }
@@ -348,35 +395,46 @@ class CallController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// ANYTIME HOST: start accepting connections. Requires a PIN; starts screen
-  /// capture (one consent dialog) so viewers get video the instant they connect,
-  /// then arms the device on the server.
+  /// ANYTIME HOST: go online (keep-alive foreground service) WITHOUT screen
+  /// sharing — no capture-consent dialog at arm time. Camera/mic are available
+  /// on demand; the screen is shared later on the viewer's request (or the
+  /// host's "Share screen" button).
   Future<void> armDevice() async {
     if (!hasPin || _pinSalt == null || _pinHash == null || deviceId == null) {
       _setStatus('Set a PIN first');
       return;
     }
-    if (!isSharing) {
-      await startSharing();
-      if (!isSharing) return; // user cancelled the capture consent dialog
-    }
+    await ScreenCaptureService.startService(); // connectedDevice keep-alive
     armed = true;
     _addLog('Allowing remote connections…');
     _signaling.armDevice(deviceId!, _pinSalt!, _pinHash!);
     notifyListeners();
   }
 
-  /// ANYTIME HOST: stop accepting connections and stop capturing.
+  /// ANYTIME HOST: stop accepting connections and tear down the host service.
   Future<void> disarmDevice() async {
     armed = false;
     _signaling.disarmDevice();
     await SessionStore.setArmedState(false);
     cameraAllowed = false;
     if (cameraActive) await _stopCameraInternal();
-    await stopSharing();
+    micAllowed = false;
+    if (micActive) await _stopMicInternal();
+    _persistMediaPrefs();
+    if (isSharing) {
+      await _webrtc.removeScreenTrack();
+      isSharing = false;
+    }
+    await ScreenCaptureService.stopService(); // stop the keep-alive FGS
     _addLog('Stopped allowing remote connections');
     _setStatus('Not allowing connections');
     notifyListeners();
+  }
+
+  /// VIEWER: ask the host to start sharing their screen.
+  void requestHostScreen() {
+    if (!dataChannelOpen) return;
+    _webrtc.sendData(jsonEncode({'t': 'reqscreen'}));
   }
 
   /// HOST: start the foreground service, then capture the screen via the system
@@ -389,54 +447,26 @@ class CallController extends ChangeNotifier {
       return;
     }
     try {
-      // FGS must run before MediaProjection (Android 10+/14 requirement).
+      // FGS must run (and carry the mediaProjection type) before MediaProjection
+      // (Android 10+/14 requirement).
       await ScreenCaptureService.startService();
+      await ScreenCaptureService.setScreen(true);
       final stream = await navigator.mediaDevices.getDisplayMedia({
         'video': true,
         'audio': false,
       });
       await _webrtc.setLocalStream(stream);
       isSharing = true;
-      _addLog('Screen capture started');
+      screenRequested = false;
+      _addLog('Screen sharing started');
       _setStatus(peerConnected ? 'Sharing (connected)' : 'Sharing — waiting');
     } catch (e) {
-      await ScreenCaptureService.stopService();
+      // Revert the mediaProjection type but keep the keep-alive service so an
+      // armed host stays online even if the consent dialog was cancelled.
+      await ScreenCaptureService.setScreen(false);
       _addLog('Share failed: $e');
       _setStatus('Share failed');
     }
-  }
-
-  /// VIEWER: send a normalized touch event (x,y in 0.0–1.0) to the host over the
-  /// control data channel. Shape: {"t":"tap|down|move|up","x":..,"y":..}.
-  /// The host denormalizes against its real screen size (Phase 5).
-  void sendTouch(String type, double x, double y) {
-    if (!dataChannelOpen) return;
-    _webrtc.sendData(jsonEncode({'t': type, 'x': x, 'y': y}));
-  }
-
-  /// HOST: parse an inbound touch message and inject it via the accessibility
-  /// service. Returns true if [text] was a recognized gesture message.
-  bool _injectGesture(String text) {
-    final Map<String, dynamic> data;
-    try {
-      final decoded = jsonDecode(text);
-      if (decoded is! Map) return false;
-      data = Map<String, dynamic>.from(decoded);
-    } catch (_) {
-      return false;
-    }
-    final type = data['t'];
-    final x = data['x'];
-    final y = data['y'];
-    if (type is! String || x is! num || y is! num) return false;
-    RemoteControlService.sendGesture(type, x.toDouble(), y.toDouble()).then((ok) {
-      if (!ok && accessibilityEnabled) {
-        accessibilityEnabled = false;
-        _addLog('Remote control blocked — enable Accessibility');
-        notifyListeners();
-      }
-    });
-    return true;
   }
 
   /// HOST: allow the viewer to view your camera. This does NOT turn the camera
@@ -448,6 +478,7 @@ class CallController extends ChangeNotifier {
     // Grant the camera permission NOW (host is here), so the on-demand camera
     // never has to prompt the host again — including while backgrounded.
     SystemService.requestCameraPermission();
+    _persistMediaPrefs();
     _addLog('Camera available — turns on only when the viewer looks');
     _signalCameraAvailability();
     notifyListeners();
@@ -457,6 +488,7 @@ class CallController extends ChangeNotifier {
   Future<void> disallowCamera() async {
     cameraAllowed = false;
     if (cameraActive) await _stopCameraInternal();
+    _persistMediaPrefs();
     _signalCameraAvailability();
     notifyListeners();
   }
@@ -506,11 +538,192 @@ class CallController extends ChangeNotifier {
     _webrtc.sendData(jsonEncode({'t': 'cam', 'want': want}));
   }
 
-  /// Handle the camera control messages exchanged over the data channel.
-  /// HOST receives `{"t":"cam","want":bool}`; VIEWER receives
-  /// `{"t":"camavail","on":bool}`. Returns true if it was such a message.
-  bool _handleCameraMessage(String text) {
-    if (!text.contains('"cam')) return false; // fast path past touch events
+  /// VIEWER: ask the host to flip between front and back camera.
+  void requestCameraFlip() {
+    if (!dataChannelOpen) return;
+    _webrtc.sendData(jsonEncode({'t': 'camflip'}));
+  }
+
+  /// HOST: flip the live camera (front ↔ back).
+  Future<void> flipCamera() async {
+    if (!cameraActive) return;
+    await _webrtc.switchCamera();
+    _addLog('Camera flipped');
+  }
+
+  // ---- Microphone (host "let the viewer listen") — same on-demand model ----
+
+  /// HOST: allow the viewer to listen. Doesn't open the mic — that happens only
+  /// when the viewer asks ([_startMicInternal]). Grants the mic permission now.
+  Future<void> allowMic() async {
+    if (kIsWeb) return;
+    micAllowed = true;
+    SystemService.requestMicPermission();
+    _persistMediaPrefs();
+    _addLog('Mic available — turns on only when the viewer listens');
+    _signalMicAvailability();
+    notifyListeners();
+  }
+
+  /// HOST: revoke listening (and stop the mic if it's live).
+  Future<void> disallowMic() async {
+    micAllowed = false;
+    if (micActive) await _stopMicInternal();
+    _persistMediaPrefs();
+    _signalMicAvailability();
+    notifyListeners();
+  }
+
+  void _signalMicAvailability() {
+    if (dataChannelOpen) {
+      _webrtc.sendData(jsonEncode({'t': 'micavail', 'on': micAllowed}));
+    }
+  }
+
+  /// HOST: open the mic — only when the viewer requests it.
+  Future<void> _startMicInternal() async {
+    if (micActive || !micAllowed || kIsWeb) return;
+    try {
+      await ScreenCaptureService.setMic(true); // microphone FGS type (background)
+      final stream = await navigator.mediaDevices.getUserMedia({
+        'audio': true,
+        'video': false,
+      });
+      await _webrtc.addMicTrack(stream);
+      micActive = true;
+      _addLog('Mic on (viewer is listening)');
+      notifyListeners();
+    } catch (e) {
+      await ScreenCaptureService.setMic(false);
+      _addLog('Mic failed: $e');
+    }
+  }
+
+  /// HOST: close the mic (viewer stopped listening / revoked).
+  Future<void> _stopMicInternal() async {
+    if (!micActive) return;
+    await _webrtc.removeMicTrack();
+    await ScreenCaptureService.setMic(false);
+    micActive = false;
+    _addLog('Mic off');
+    notifyListeners();
+  }
+
+  /// VIEWER: ask the host to start/stop sending their microphone.
+  void requestHostMic(bool want) {
+    if (!dataChannelOpen) return;
+    _webrtc.sendData(jsonEncode({'t': 'mic', 'want': want}));
+  }
+
+  // ── File access ────────────────────────────────────────────────────────────
+
+  /// HOST: add a folder the viewer is allowed to browse. Persists the list and
+  /// immediately signals the change to any connected viewer. Requests storage
+  /// permission on the first add so subsequent reads don't fail silently.
+  Future<void> addPermittedFolder(String path) async {
+    final trimmed = path.trim();
+    if (trimmed.isEmpty || permittedFolders.contains(trimmed)) return;
+    if (permittedFolders.isEmpty) SystemService.requestStoragePermission();
+    permittedFolders = [...permittedFolders, trimmed];
+    await SessionStore.setPermittedFolders(permittedFolders);
+    _signalFoldersAvailability();
+    _addLog('Shared folder added: $trimmed');
+    notifyListeners();
+  }
+
+  /// HOST: remove a permitted folder and signal the viewer.
+  Future<void> removePermittedFolder(String path) async {
+    permittedFolders = permittedFolders.where((f) => f != path).toList();
+    await SessionStore.setPermittedFolders(permittedFolders);
+    _signalFoldersAvailability();
+    _addLog('Shared folder removed: $path');
+    notifyListeners();
+  }
+
+  void _signalFoldersAvailability() {
+    if (dataChannelOpen) {
+      _webrtc.sendData(jsonEncode({
+        't': 'filesavail',
+        'folders': permittedFolders,
+      }));
+    }
+  }
+
+  /// VIEWER: request a directory listing from the host.
+  void requestFileList(String path) {
+    if (!dataChannelOpen) return;
+    _webrtc.sendData(jsonEncode({'t': 'reqfilelist', 'path': path}));
+  }
+
+  /// VIEWER: request file content from the host.
+  void requestFile(String path) {
+    if (!dataChannelOpen) return;
+    _webrtc.sendData(jsonEncode({'t': 'reqfile', 'path': path}));
+  }
+
+  /// Consume and return the latest file-list response (clears it after read).
+  ({String path, List<FileEntry> entries})? takeFileListResult() {
+    final r = fileListResult;
+    fileListResult = null;
+    return r;
+  }
+
+  /// Consume and return the latest file-data response (clears it after read).
+  ({String path, String text})? takeFileDataResult() {
+    final r = fileDataResult;
+    fileDataResult = null;
+    return r;
+  }
+
+  /// Consume and return the latest file-error response (clears it after read).
+  ({String path, String error})? takeFileErrorResult() {
+    final r = fileErrorResult;
+    fileErrorResult = null;
+    return r;
+  }
+
+  /// HOST: handle an incoming reqfilelist message from the viewer.
+  Future<void> _handleFileListRequest(String path) async {
+    if (!FileAccessService.isAllowed(path, permittedFolders)) {
+      _sendFileError(path, 'Access denied');
+      return;
+    }
+    try {
+      final entries = await FileAccessService.listDirectory(path);
+      _webrtc.sendData(jsonEncode({
+        't': 'filelist',
+        'path': path,
+        'entries': entries.map((e) => e.toJson()).toList(),
+      }));
+    } catch (e) {
+      _sendFileError(path, e.toString());
+    }
+  }
+
+  /// HOST: handle an incoming reqfile message from the viewer.
+  Future<void> _handleFileRequest(String path) async {
+    if (!FileAccessService.isAllowed(path, permittedFolders)) {
+      _sendFileError(path, 'Access denied');
+      return;
+    }
+    try {
+      final text = await FileAccessService.readTextFile(path);
+      _webrtc.sendData(jsonEncode({'t': 'filedata', 'path': path, 'text': text}));
+    } catch (e) {
+      _sendFileError(path, e.toString());
+    }
+  }
+
+  void _sendFileError(String path, String msg) {
+    _webrtc.sendData(jsonEncode({'t': 'fileerr', 'path': path, 'msg': msg}));
+  }
+
+  /// Handle the camera/mic control messages over the data channel. HOST receives
+  /// `{"t":"cam"|"mic","want":bool}`; VIEWER receives
+  /// `{"t":"camavail"|"micavail","on":bool}`. Returns true if handled.
+  bool _handleMediaMessage(String text) {
+    // The data channel now only carries infrequent media-control messages
+    // (no touch events any more), so decoding each is fine.
     final Map<String, dynamic> data;
     try {
       final decoded = jsonDecode(text);
@@ -520,8 +733,24 @@ class CallController extends ChangeNotifier {
       return false;
     }
     final t = data['t'];
+    final want = data['want'] == true;
     if (role == Role.host && t == 'cam') {
-      (data['want'] == true) ? _startCameraInternal() : _stopCameraInternal();
+      want ? _startCameraInternal() : _stopCameraInternal();
+      return true;
+    }
+    if (role == Role.host && t == 'camflip') {
+      flipCamera();
+      return true;
+    }
+    if (role == Role.host && t == 'reqscreen') {
+      screenRequested = true;
+      _addLog('Viewer requested screen share');
+      _setStatus('Viewer wants to see your screen');
+      notifyListeners();
+      return true;
+    }
+    if (role == Role.host && t == 'mic') {
+      want ? _startMicInternal() : _stopMicInternal();
       return true;
     }
     if (role == Role.viewer && t == 'camavail') {
@@ -533,15 +762,73 @@ class CallController extends ChangeNotifier {
       notifyListeners();
       return true;
     }
+    if (role == Role.viewer && t == 'micavail') {
+      micAvailable = data['on'] == true;
+      if (!micAvailable) {
+        micOn = false;
+        audioRenderer.srcObject = null;
+      }
+      notifyListeners();
+      return true;
+    }
+    // ── File access ──────────────────────────────────────────────────────────
+    if (role == Role.viewer && t == 'filesavail') {
+      final raw = data['folders'];
+      availableFolders = raw is List
+          ? raw.whereType<String>().toList()
+          : <String>[];
+      filesAvailable = availableFolders.isNotEmpty;
+      notifyListeners();
+      return true;
+    }
+    if (role == Role.host && t == 'reqfilelist') {
+      final path = data['path'] as String? ?? '';
+      _handleFileListRequest(path); // async, fire-and-forget
+      return true;
+    }
+    if (role == Role.host && t == 'reqfile') {
+      final path = data['path'] as String? ?? '';
+      _handleFileRequest(path); // async, fire-and-forget
+      return true;
+    }
+    if (role == Role.viewer && t == 'filelist') {
+      final path = data['path'] as String? ?? '';
+      final rawEntries = data['entries'];
+      final entries = rawEntries is List
+          ? rawEntries
+              .whereType<Map>()
+              .map((e) => FileEntry.fromJson(Map<String, dynamic>.from(e)))
+              .toList()
+          : <FileEntry>[];
+      fileListResult = (path: path, entries: entries);
+      notifyListeners();
+      return true;
+    }
+    if (role == Role.viewer && t == 'filedata') {
+      final path = data['path'] as String? ?? '';
+      final text = data['text'] as String? ?? '';
+      fileDataResult = (path: path, text: text);
+      notifyListeners();
+      return true;
+    }
+    if (role == Role.viewer && t == 'fileerr') {
+      final path = data['path'] as String? ?? '';
+      final msg = data['msg'] as String? ?? 'Unknown error';
+      fileErrorResult = (path: path, error: msg);
+      notifyListeners();
+      return true;
+    }
     return false;
   }
 
-  /// HOST: stop capturing and tear down the foreground service.
+  /// HOST: stop screen sharing. Keeps the keep-alive service running so an armed
+  /// host stays online for camera/mic; the viewer drops the screen on the
+  /// renegotiation (screenOn → false).
   Future<void> stopSharing() async {
-    await _webrtc.stopLocalStream();
-    await ScreenCaptureService.stopService();
+    await _webrtc.removeScreenTrack();
+    await ScreenCaptureService.setScreen(false);
     isSharing = false;
-    _addLog('Screen capture stopped');
+    _addLog('Screen sharing stopped');
     _setStatus(peerConnected ? 'Connected (peer-to-peer)' : status);
   }
 
@@ -574,6 +861,7 @@ class CallController extends ChangeNotifier {
     _signaling.dispose();
     remoteRenderer.dispose();
     cameraRenderer.dispose();
+    audioRenderer.dispose();
     super.dispose();
   }
 }

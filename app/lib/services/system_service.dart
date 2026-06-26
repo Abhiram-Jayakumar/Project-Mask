@@ -36,4 +36,18 @@ class SystemService {
     if (kIsWeb) return;
     await _channel.invokeMethod('requestCameraPermission');
   }
+
+  /// Prompt for the microphone permission once (at setup).
+  static Future<void> requestMicPermission() async {
+    if (kIsWeb) return;
+    await _channel.invokeMethod('requestMicPermission');
+  }
+
+  /// Request storage read access for the host's shared-files feature.
+  /// On Android ≤ 12 this shows the READ_EXTERNAL_STORAGE runtime dialog;
+  /// on Android 13+ it opens the All Files Access settings page.
+  static Future<void> requestStoragePermission() async {
+    if (kIsWeb) return;
+    await _channel.invokeMethod('requestStoragePermission');
+  }
 }

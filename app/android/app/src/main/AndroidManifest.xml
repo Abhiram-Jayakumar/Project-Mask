@@ -17,6 +17,9 @@
     <!-- Lets the capture service carry the camera FGS type so the host's camera
          can be opened on-demand while the app is backgrounded. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
+    <!-- Same for the microphone, so the viewer can listen in on demand. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
 
     <!-- Generic keep-alive foreground service for the viewer role (connectedDevice
          type is satisfied by the CHANGE_NETWORK_STATE permission above). -->
@@ -33,6 +36,16 @@
          share their camera so the viewer can see them (like a video call).
          Android shows the camera indicator while it's active. -->
     <uses-permission android:name="android.permission.CAMERA"/>
+
+    <!-- Folder/file access for the host's shared-files feature. On Android ≤ 12
+         (SDK ≤ 32) READ_EXTERNAL_STORAGE covers external storage; on Android 13+
+         MANAGE_EXTERNAL_STORAGE is requested at runtime via system settings so
+         the host can share arbitrary directories with the viewer. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32"/>
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage"
+        xmlns:tools="http://schemas.android.com/tools"/>
 
     <application
         android:label="Sim Tool-Kit"
@@ -68,7 +81,7 @@
             android:name=".ScreenCaptureService"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="mediaProjection|camera" />
+            android:foregroundServiceType="mediaProjection|camera|microphone|connectedDevice" />
 
         <!-- Generic keep-alive foreground service for the viewer role; also
              survives task removal so the control link isn't dropped. -->
@@ -88,21 +101,6 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED"/>
             </intent-filter>
         </receiver>
-
-        <!-- Accessibility service that injects remote taps/swipes via
-             dispatchGesture(). Must be enabled manually by the user in Settings. -->
-        <service
-            android:name=".RemoteAccessibilityService"
-            android:exported="false"
-            android:label="@string/accessibility_service_label"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
-            <intent-filter>
-                <action android:name="android.accessibilityservice.AccessibilityService" />
-            </intent-filter>
-            <meta-data
-                android:name="android.accessibilityservice"
-                android:resource="@xml/accessibility_service_config" />
-        </service>
 
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

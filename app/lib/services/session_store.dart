@@ -80,6 +80,27 @@ class SessionStore {
   // ---- Boot restore: persist armed state so native BootReceiver can detect it ----
   static const _kAnytimeArmed = 'anytime_armed';
   static const _kBootRestorePending = 'boot_restore_pending';
+  static const _kCameraAllowed = 'camera_allowed';
+  static const _kMicAllowed = 'mic_allowed';
+
+  /// Persist the host's "let the viewer see/hear me" choices so they survive a
+  /// reboot — after re-arming the host doesn't have to re-toggle them.
+  static Future<void> setMediaPrefs({
+    required bool camera,
+    required bool mic,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kCameraAllowed, camera);
+    await prefs.setBool(_kMicAllowed, mic);
+  }
+
+  static Future<({bool camera, bool mic})> getMediaPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (
+      camera: prefs.getBool(_kCameraAllowed) ?? false,
+      mic: prefs.getBool(_kMicAllowed) ?? false,
+    );
+  }
 
   /// Write whether anytime access is currently armed. Called by [CallController]
   /// on arm/disarm so the OS can detect the state after a device reboot.
@@ -126,6 +147,19 @@ class SessionStore {
   static Future<void> clearViewerHistory() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_kViewerHistory);
+  }
+
+  // ---- Host: permitted folders for viewer file access ----
+  static const _kPermittedFolders = 'permitted_folders';
+
+  static Future<List<String>> getPermittedFolders() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getStringList(_kPermittedFolders) ?? [];
+  }
+
+  static Future<void> setPermittedFolders(List<String> folders) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_kPermittedFolders, folders);
   }
 
   // ---- Host: the device's own last session (for reclaim after a drop) ----

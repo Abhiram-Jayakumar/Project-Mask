@@ -146,7 +146,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 icon: const Icon(Icons.visibility),
                 style: OutlinedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 18)),
-                label: const Text('Control a device (Viewer)'),
+                label: const Text('View a device (Viewer)'),
               ),
               const Spacer(),
               Text(

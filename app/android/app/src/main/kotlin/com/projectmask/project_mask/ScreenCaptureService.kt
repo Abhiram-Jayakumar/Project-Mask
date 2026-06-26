@@ -39,7 +39,9 @@ class ScreenCaptureService : Service() {
         var instance: ScreenCaptureService? = null
     }
 
+    private var screenOn = false
     private var cameraOn = false
+    private var micOn = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -50,26 +52,46 @@ class ScreenCaptureService : Service() {
         return START_NOT_STICKY
     }
 
+    /** Add/remove the mediaProjection FGS type (screen sharing on/off). The base
+     *  type is always connectedDevice, so the host can stay "online" for the
+     *  session (camera/mic on-demand) without sharing the screen. */
+    fun updateScreenType(on: Boolean) {
+        screenOn = on
+        startForegroundWithType()
+    }
+
     /** Add/remove the camera FGS type from the already-running service. */
     fun updateCameraType(on: Boolean) {
         cameraOn = on
         startForegroundWithType()
     }
 
-    private fun hasCameraPermission(): Boolean =
+    /** Add/remove the microphone FGS type from the already-running service. */
+    fun updateMicType(on: Boolean) {
+        micOn = on
+        startForegroundWithType()
+    }
+
+    private fun hasPermission(name: String): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
-            checkSelfPermission(Manifest.permission.CAMERA) ==
-            PackageManager.PERMISSION_GRANTED
+            checkSelfPermission(name) == PackageManager.PERMISSION_GRANTED
 
     private fun startForegroundWithType() {
         val notification = buildNotification()
         when {
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
-                var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                // Only add the camera type when the permission is granted, else
-                // startForeground throws and would kill the screen share.
-                if (cameraOn && hasCameraPermission()) {
+                // Base = connectedDevice (host keep-alive; satisfied by
+                // CHANGE_NETWORK_STATE). Add other types only when active AND
+                // their permission is granted, else startForeground throws.
+                var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                if (screenOn) {
+                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                }
+                if (cameraOn && hasPermission(Manifest.permission.CAMERA)) {
                     type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+                }
+                if (micOn && hasPermission(Manifest.permission.RECORD_AUDIO)) {
+                    type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
                 }
                 startForeground(NOTIFICATION_ID, notification, type)
             }
@@ -77,7 +99,11 @@ class ScreenCaptureService : Service() {
                 startForeground(
                     NOTIFICATION_ID,
                     notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+                    if (screenOn) {
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                    } else {
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                    },
                 )
             else -> startForeground(NOTIFICATION_ID, notification)
         }

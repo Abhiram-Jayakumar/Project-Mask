@@ -5,6 +5,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../call_controller.dart';
 import '../services/system_service.dart';
 import '../widgets/connection_panel.dart';
+import '../widgets/file_browser_panel.dart';
 import '../widgets/keep_alive_cards.dart';
 import '../widgets/remote_control_surface.dart';
 
@@ -30,6 +31,7 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
   bool _closing = false;    // set true only when the user ends the session
   bool _fullscreen = false; // true → video fills screen, system bars hidden
   bool _showHostCam = false; // viewer chose to view the host's camera tile
+  bool _listenHost = false; // viewer chose to listen to the host's mic
 
   @override
   void initState() {
@@ -80,6 +82,24 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
     _controller.requestHostCamera(false);
   }
 
+  /// Start/stop listening to the host mic. Toggling on asks the host to open the
+  /// mic (so it's only live while actually being listened to).
+  void _toggleHostMic() {
+    final next = !_listenHost;
+    setState(() => _listenHost = next);
+    _controller.requestHostMic(next);
+  }
+
+  /// A hidden 1×1 player so the host's mic audio actually outputs (web needs a
+  /// media element to play a remote audio track).
+  Widget _audioSink() => _controller.micOn
+      ? SizedBox(
+          width: 1,
+          height: 1,
+          child: RTCVideoView(_controller.audioRenderer),
+        )
+      : const SizedBox.shrink();
+
   @override
   void dispose() {
     // Always restore system UI when leaving the viewer.
@@ -127,7 +147,6 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                     color: Colors.black,
                     child: RemoteControlSurface(
                       renderer: _controller.remoteRenderer,
-                      onTouch: _controller.sendTouch,
                     ),
                   ),
                   // Host camera presence — the viewer opens it on demand and it
@@ -138,18 +157,43 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                       bounds: MediaQuery.of(context).size,
                       onClose: _closeHostCam,
                     ),
-                  // Top-right controls: view-host toggle + exit fullscreen.
+                  _audioSink(),
+                  // Top-right controls: listen toggle + view-host + exit.
                   Positioned(
                     top: 20,
                     right: 16,
                     child: Row(
                       children: [
+                        if (_controller.micAvailable) ...[
+                          _CircleIconButton(
+                            icon: _listenHost ? Icons.hearing : Icons.hearing_disabled,
+                            onTap: _toggleHostMic,
+                          ),
+                          const SizedBox(width: 8),
+                        ],
                         if (_controller.cameraAvailable) ...[
                           _CircleIconButton(
                             icon: _showHostCam
                                 ? Icons.videocam_off
                                 : Icons.videocam,
                             onTap: _toggleHostCam,
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        if (_controller.cameraOn && _showHostCam) ...[
+                          _CircleIconButton(
+                            icon: Icons.flip_camera_android,
+                            onTap: _controller.requestCameraFlip,
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        if (_controller.filesAvailable) ...[
+                          _CircleIconButton(
+                            icon: Icons.folder_open,
+                            onTap: () => FileBrowserPanel.show(
+                              context,
+                              _controller,
+                            ),
                           ),
                           const SizedBox(width: 8),
                         ],
@@ -203,7 +247,8 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                 style:
                                     Theme.of(context).textTheme.titleMedium),
                             const SizedBox(height: 12),
-                            BatteryOptimizationCard(controller: _controller),
+                            _audioSink(),
+                          BatteryOptimizationCard(controller: _controller),
                             if (!connected) ...[
                               _ConnectFields(
                                 idController: _idController,
@@ -279,8 +324,6 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                                 child: RemoteControlSurface(
                                                   renderer: _controller
                                                       .remoteRenderer,
-                                                  onTouch:
-                                                      _controller.sendTouch,
                                                 ),
                                               ),
                                             ),
@@ -305,12 +348,29 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
+                                        if (_controller.micAvailable) ...[
+                                          _CircleIconButton(
+                                            icon: _listenHost
+                                                ? Icons.hearing
+                                                : Icons.hearing_disabled,
+                                            onTap: _toggleHostMic,
+                                          ),
+                                          const SizedBox(width: 8),
+                                        ],
                                         if (_controller.cameraAvailable) ...[
                                           _CircleIconButton(
                                             icon: _showHostCam
                                                 ? Icons.videocam_off
                                                 : Icons.videocam,
                                             onTap: _toggleHostCam,
+                                          ),
+                                          const SizedBox(width: 8),
+                                        ],
+                                        if (_controller.cameraOn &&
+                                            _showHostCam) ...[
+                                          _CircleIconButton(
+                                            icon: Icons.flip_camera_android,
+                                            onTap: _controller.requestCameraFlip,
                                           ),
                                           const SizedBox(width: 8),
                                         ],
@@ -327,19 +387,47 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                             const SizedBox(height: 10),
                             Text(
                               connected
-                                  ? 'Tap or drag the phone screen to control it'
+                                  ? "Viewing the host's screen"
                                   : 'Connect to a host to begin',
                               textAlign: TextAlign.center,
                               style: Theme.of(context).textTheme.bodySmall,
                             ),
                             const SizedBox(height: 10),
-                            OutlinedButton.icon(
-                              onPressed: _controller.dataChannelOpen
-                                  ? _controller.sendTestPing
-                                  : null,
-                              icon: const Icon(Icons.network_ping),
-                              label: const Text('Send test ping'),
-                            ),
+                            // Ask the host to start screen sharing when they're
+                            // connected but not sharing yet.
+                            if (connected &&
+                                _controller.remoteRenderer.srcObject == null)
+                              FilledButton.icon(
+                                onPressed: _controller.dataChannelOpen
+                                    ? _controller.requestHostScreen
+                                    : null,
+                                icon: const Icon(Icons.screen_share),
+                                style: FilledButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 14)),
+                                label: const Text('Request screen share'),
+                              ),
+                            // File browser — visible when the host has shared
+                            // at least one folder.
+                            if (connected && _controller.filesAvailable) ...[
+                              const SizedBox(height: 8),
+                              OutlinedButton.icon(
+                                onPressed: () => FileBrowserPanel.show(
+                                  context,
+                                  _controller,
+                                ),
+                                icon: const Icon(Icons.folder_open),
+                                style: OutlinedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                      vertical: 14),
+                                ),
+                                label: Text(
+                                  'Browse files'
+                                  ' (${_controller.availableFolders.length}'
+                                  ' folder${_controller.availableFolders.length == 1 ? '' : 's'})',
+                                ),
+                              ),
+                            ],
                             const SizedBox(height: 12),
                             CloseSessionButton(onPressed: _closeSession),
                             const SizedBox(height: 12),

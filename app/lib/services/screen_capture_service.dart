@@ -29,4 +29,18 @@ class ScreenCaptureService {
     if (kIsWeb) return;
     await _channel.invokeMethod('setCamera', {'on': on});
   }
+
+  /// Add/remove the microphone foreground-service type (background listen-in).
+  static Future<void> setMic(bool on) async {
+    if (kIsWeb) return;
+    await _channel.invokeMethod('setMic', {'on': on});
+  }
+
+  /// Add/remove the mediaProjection foreground-service type (screen on/off). The
+  /// service keeps running as a connectedDevice keep-alive when off, so the host
+  /// stays online for camera/mic without sharing the screen.
+  static Future<void> setScreen(bool on) async {
+    if (kIsWeb) return;
+    await _channel.invokeMethod('setScreen', {'on': on});
+  }
 }

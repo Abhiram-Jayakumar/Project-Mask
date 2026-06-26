@@ -14,18 +14,25 @@ import '../config.dart';
 class WebRtcService {
   RTCPeerConnection? _pc;
   RTCDataChannel? _dataChannel;
-  MediaStream? _localStream;
+  MediaStream? _localStream; // HOST: the screen
+  RTCRtpSender? _screenSender;
 
-  // HOST: optional front-camera "presence" stream, sent as a SECOND video track
-  // alongside the screen.
+  // HOST: optional front-camera "presence" stream, sent as a SECOND video track.
   MediaStream? _cameraStream;
   RTCRtpSender? _cameraSender;
-  // VIEWER: the id of the FIRST remote stream (the screen). The host always
-  // shares the screen before the camera, so anything that isn't this stream is
-  // the camera — far more reliable than matching signaled stream ids, which
-  // libwebrtc doesn't preserve across the connection here.
-  String? _screenStreamId;
+  // HOST: optional microphone stream so the viewer can listen in on demand.
+  MediaStream? _micStream;
+  RTCRtpSender? _micSender;
+
+  // VIEWER routing: the host announces which media are on (screenOn/cameraOn/
+  // micOn) on every offer. A video track is the SCREEN when the host says it's
+  // sharing and we haven't bound one yet; any other video track is the camera;
+  // audio is the mic. This is reliable regardless of track arrival order (which
+  // matters now that camera/audio can arrive before any screen).
+  bool _remoteScreenOn = false;
+  bool _haveScreen = false;
   bool _remoteCameraPresent = false;
+  bool _remoteMicPresent = false;
 
   // ICE candidates can arrive before the remote description is set; buffer them.
   bool _remoteDescriptionSet = false;
@@ -37,9 +44,12 @@ class WebRtcService {
   void Function(RTCPeerConnectionState state)? onConnectionState;
   void Function(String text)? onDataMessage;
   void Function(bool open)? onDataChannelOpen;
-  void Function(MediaStream stream)? onRemoteStream;
+  void Function(MediaStream stream)? onRemoteStream; // viewer: screen arrived
+  void Function()? onScreenRemoved; // viewer: host stopped screen sharing
   void Function(MediaStream stream)? onCameraStream; // viewer: host camera arrived
   void Function()? onCameraRemoved; // viewer: host turned camera off
+  void Function(MediaStream stream)? onMicStream; // viewer: host mic audio arrived
+  void Function()? onMicRemoved; // viewer: host turned mic off
 
   RTCPeerConnection? get peerConnection => _pc;
 
@@ -62,12 +72,16 @@ class WebRtcService {
     };
     pc.onConnectionState = (state) => onConnectionState?.call(state);
     pc.onTrack = (event) {
+      // Audio tracks are the host's microphone (the only audio we send).
+      if (event.track.kind == 'audio') {
+        if (event.streams.isNotEmpty) onMicStream?.call(event.streams.first);
+        return;
+      }
       if (event.streams.isEmpty) return;
       final stream = event.streams.first;
-      // First remote stream = the screen (always shared first). Any other
-      // stream is the camera presence feed → its own renderer/tile.
-      if (_screenStreamId == null || stream.id == _screenStreamId) {
-        _screenStreamId ??= stream.id;
+      // Screen if the host is sharing and we haven't bound one; else camera.
+      if (_remoteScreenOn && !_haveScreen) {
+        _haveScreen = true;
         onRemoteStream?.call(stream);
       } else {
         onCameraStream?.call(stream);
@@ -96,9 +110,12 @@ class WebRtcService {
     if (_localStream != null) {
       await _addStreamTracks(_localStream!);
     }
-    // Re-attach the camera presence track too (e.g. after a reconnect).
+    // Re-attach the camera/mic tracks too (e.g. after a reconnect).
     if (_cameraStream != null) {
       await _attachCameraTracks();
+    }
+    if (_micStream != null) {
+      await _attachMicTracks();
     }
     await _createAndSendOffer();
   }
@@ -123,9 +140,24 @@ class WebRtcService {
     for (final track in stream.getTracks()) {
       final sender = await _pc!.addTrack(track, stream);
       if (track.kind == 'video') {
+        _screenSender = sender;
         await _applyVideoQuality(sender);
       }
     }
+  }
+
+  /// HOST: stop screen sharing and renegotiate so the viewer drops the screen
+  /// (the session stays alive for camera/mic).
+  Future<void> removeScreenTrack() async {
+    final sender = _screenSender;
+    _screenSender = null;
+    if (sender != null && _pc != null) {
+      try {
+        await _pc!.removeTrack(sender);
+      } catch (_) {}
+    }
+    await stopLocalStream();
+    if (_pc != null) await _createAndSendOffer();
   }
 
   /// Raise the max bitrate and tell the encoder to preserve resolution (sharp
@@ -211,6 +243,16 @@ class WebRtcService {
     } catch (_) {}
   }
 
+  /// HOST: flip the live camera between front and back (no renegotiation —
+  /// the capturer is swapped under the same track).
+  Future<void> switchCamera() async {
+    final tracks = _cameraStream?.getVideoTracks();
+    if (tracks == null || tracks.isEmpty) return;
+    try {
+      await Helper.switchCamera(tracks.first);
+    } catch (_) {}
+  }
+
   /// HOST: stop sending the camera and renegotiate so the viewer drops the tile.
   Future<void> removeCameraTrack() async {
     final sender = _cameraSender;
@@ -234,6 +276,46 @@ class WebRtcService {
     await stream.dispose();
   }
 
+  /// HOST: add the microphone stream so the viewer can listen, and renegotiate.
+  Future<void> addMicTrack(MediaStream micStream) async {
+    _micStream = micStream;
+    if (_pc == null) return;
+    await _attachMicTracks();
+    await _createAndSendOffer();
+  }
+
+  Future<void> _attachMicTracks() async {
+    final stream = _micStream;
+    if (stream == null || _pc == null) return;
+    for (final track in stream.getTracks()) {
+      final sender = await _pc!.addTrack(track, stream);
+      if (track.kind == 'audio') _micSender = sender;
+    }
+  }
+
+  /// HOST: stop sending the mic and renegotiate so the viewer drops the audio.
+  Future<void> removeMicTrack() async {
+    final sender = _micSender;
+    _micSender = null;
+    if (sender != null && _pc != null) {
+      try {
+        await _pc!.removeTrack(sender);
+      } catch (_) {}
+    }
+    await _stopMicStream();
+    if (_pc != null) await _createAndSendOffer();
+  }
+
+  Future<void> _stopMicStream() async {
+    final stream = _micStream;
+    _micStream = null;
+    if (stream == null) return;
+    for (final track in stream.getTracks()) {
+      await track.stop();
+    }
+    await stream.dispose();
+  }
+
   Future<void> _createAndSendOffer() async {
     final offer = await _pc!.createOffer();
     await _pc!.setLocalDescription(offer);
@@ -243,7 +325,11 @@ class WebRtcService {
       'type': offer.type,
       // Tell the viewer which inbound stream is the camera presence track (null
       // when the host isn't sharing their camera).
-      'cameraStreamId': _cameraStream?.id,
+      // The host announces which media are live so the viewer routes tracks
+      // reliably (and drops them when turned off), regardless of arrival order.
+      'screenOn': _localStream != null,
+      'cameraOn': _cameraStream != null,
+      'micOn': _micStream != null,
     });
   }
 
@@ -261,14 +347,25 @@ class WebRtcService {
     await _ensurePeerConnection();
     switch (payload['kind']) {
       case 'offer':
-        // The host flags whether its camera is on. We use onTrack to ROUTE the
-        // camera stream, and this flag to know when it's turned OFF (no track
-        // removal event fires) so the viewer can drop the tile.
-        final camPresent = payload['cameraStreamId'] != null;
+        // Apply the host's media flags BEFORE the tracks arrive so onTrack
+        // routes correctly, and fire *Removed when something turned off (no
+        // track-removal event fires on its own).
+        final screenOn = payload['screenOn'] == true;
+        if (!screenOn && _remoteScreenOn) {
+          _haveScreen = false;
+          onScreenRemoved?.call();
+        }
+        _remoteScreenOn = screenOn;
+        final camPresent = payload['cameraOn'] == true;
         if (!camPresent && _remoteCameraPresent) {
           onCameraRemoved?.call();
         }
         _remoteCameraPresent = camPresent;
+        final micPresent = payload['micOn'] == true;
+        if (!micPresent && _remoteMicPresent) {
+          onMicRemoved?.call();
+        }
+        _remoteMicPresent = micPresent;
         await _pc!.setRemoteDescription(
           RTCSessionDescription(payload['sdp'] as String, payload['type'] as String),
         );
@@ -319,9 +416,13 @@ class WebRtcService {
     await _pc?.close();
     _dataChannel = null;
     _pc = null;
-    _cameraSender = null; // belonged to the closed pc; re-added in startAsHost
-    _screenStreamId = null; // re-learned from the first track after reconnect
+    _screenSender = null; // belonged to the closed pc; re-added in startAsHost
+    _cameraSender = null;
+    _micSender = null;
+    _remoteScreenOn = false;
+    _haveScreen = false;
     _remoteCameraPresent = false;
+    _remoteMicPresent = false;
     _remoteDescriptionSet = false;
     _pendingCandidates.clear();
   }
@@ -329,6 +430,7 @@ class WebRtcService {
   Future<void> dispose() async {
     await stopLocalStream();
     await _stopCameraStream();
+    await _stopMicStream();
     await resetPeer();
   }
 }

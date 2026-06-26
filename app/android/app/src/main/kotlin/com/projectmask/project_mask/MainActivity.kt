@@ -1,9 +1,13 @@
 package com.projectmask.project_mask
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 
 /**
@@ -47,6 +51,49 @@ class MainActivity : FlutterActivity() {
             PackageManager.PERMISSION_GRANTED
         ) {
             requestPermissions(arrayOf(Manifest.permission.CAMERA), 1002)
+        }
+    }
+
+    /** Prompt for RECORD_AUDIO once (at setup) for on-demand listen-in. */
+    fun requestMicPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            checkSelfPermission(Manifest.permission.RECORD_AUDIO) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1003)
+        }
+    }
+
+    /**
+     * Request storage read access so the host can share folders with the viewer.
+     * On Android ≤ 12: standard READ_EXTERNAL_STORAGE runtime prompt.
+     * On Android 13+: open the "All files access" settings page (MANAGE_EXTERNAL_STORAGE
+     * cannot be requested via the normal runtime dialog).
+     */
+    fun requestStoragePermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Android 11+ (API 30+): MANAGE_EXTERNAL_STORAGE requires the user
+            // to grant "All files access" from a dedicated system settings page.
+            if (!Environment.isExternalStorageManager()) {
+                try {
+                    startActivity(
+                        Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                            .setData(Uri.parse("package:$packageName"))
+                    )
+                } catch (_: Exception) {
+                    startActivity(
+                        Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    )
+                }
+            }
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) !=
+                PackageManager.PERMISSION_GRANTED
+            ) {
+                requestPermissions(
+                    arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), 1004
+                )
+            }
         }
     }
 
