@@ -1,14 +1,18 @@
 package com.projectmask.project_mask
 
 import android.annotation.SuppressLint
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.provider.Settings
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 /**
  * Registers all of the app's platform channels on the cached engine's messenger,
@@ -102,10 +106,22 @@ object MaskChannels {
                     result.success(MainActivity.current != null)
                 }
                 "requestStoragePermission" -> {
-                    // On Android ≤ 12: runtime READ_EXTERNAL_STORAGE dialog.
-                    // On Android 13+: opens the All Files Access settings page.
                     MainActivity.current?.requestStoragePermission()
                     result.success(MainActivity.current != null)
+                }
+                "saveToDownloads" -> {
+                    val filename = call.argument<String>("filename") ?: "download"
+                    val data = call.argument<ByteArray>("data")
+                    if (data == null) {
+                        result.error("NO_DATA", "No file data provided", null)
+                    } else {
+                        try {
+                            val savedPath = saveToDownloads(app, filename, data)
+                            result.success(savedPath)
+                        } catch (e: Exception) {
+                            result.error("SAVE_FAILED", e.message, null)
+                        }
+                    }
                 }
                 else -> result.notImplemented()
             }
@@ -125,6 +141,42 @@ object MaskChannels {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         return pm.isIgnoringBatteryOptimizations(context.packageName)
+    }
+
+    /**
+     * Save [data] as [filename] in the public Downloads folder.
+     * Returns the path shown to the user.
+     *
+     * Android 10+ (API 29+): uses MediaStore so the file appears in the
+     * system Downloads app without requiring WRITE_EXTERNAL_STORAGE.
+     * Android 9 and below: writes directly via java.io.File.
+     */
+    private fun saveToDownloads(context: Context, filename: String, data: ByteArray): String {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, filename)
+                put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val resolver = context.contentResolver
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw Exception("Could not create Downloads entry")
+            resolver.openOutputStream(uri)?.use { it.write(data) }
+                ?: throw Exception("Could not open output stream")
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            "Downloads/$filename"
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOWNLOADS
+            )
+            dir.mkdirs()
+            val file = File(dir, filename)
+            file.writeBytes(data)
+            file.absolutePath
+        }
     }
 
     @SuppressLint("BatteryLife")

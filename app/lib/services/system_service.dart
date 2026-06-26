@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
 
@@ -49,5 +51,17 @@ class SystemService {
   static Future<void> requestStoragePermission() async {
     if (kIsWeb) return;
     await _channel.invokeMethod('requestStoragePermission');
+  }
+
+  /// Save [bytes] as [filename] in the device's public Downloads folder.
+  /// Returns the saved path (e.g. "Downloads/file.txt") on success.
+  /// Throws on failure. No-op on web (returns empty string).
+  static Future<String> saveFileToDownloads(String filename, Uint8List bytes) async {
+    if (kIsWeb) return '';
+    final result = await _channel.invokeMethod<String>('saveToDownloads', {
+      'filename': filename,
+      'data': bytes,
+    });
+    return result ?? 'Downloads/$filename';
   }
 }

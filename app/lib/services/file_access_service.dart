@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 /// A single directory entry as sent over the data channel.
 class FileEntry {
@@ -20,7 +22,15 @@ class FileEntry {
 /// HOST-SIDE file system access, restricted to paths the host has explicitly
 /// permitted. All path checks run through [_norm] to defeat traversal attacks.
 class FileAccessService {
-  static const int maxTextBytes = 64 * 1024; // 64 KB cap for data-channel safety
+  /// First N bytes sent as a text preview (viewer sees this instantly on tap).
+  static const int previewBytes = 2048; // 2 KB
+
+  /// Bytes per download chunk sent over the data channel. Base64-encoded this
+  /// becomes ~64 KB per message, safely within WebRTC data-channel limits.
+  static const int chunkSize = 48 * 1024; // 48 KB raw → ~64 KB base64
+
+  /// Hard cap on file downloads to avoid very long transfers (can be raised).
+  static const int maxDownloadBytes = 50 * 1024 * 1024; // 50 MB
 
   // ── Path security ──────────────────────────────────────────────────────────
 
@@ -45,16 +55,12 @@ class FileAccessService {
         out.add(seg);
       }
     }
-    // Preserve leading slash but drop trailing slash.
     final joined = out.join('/');
     return joined.isEmpty ? '/' : joined;
   }
 
   // ── File system operations ─────────────────────────────────────────────────
 
-  /// List a directory. Entries are sorted: directories first, then files, each
-  /// group sorted case-insensitively. Hidden files (starting with .) are
-  /// included so the host can share dotfile-heavy config directories.
   static Future<List<FileEntry>> listDirectory(String path) async {
     final dir = Directory(path);
     if (!await dir.exists()) throw Exception('Directory not found: $path');
@@ -68,9 +74,7 @@ class FileAccessService {
           isDir: entity is Directory,
           size: stat.size,
         ));
-      } catch (_) {
-        // Skip entries we can't stat (broken symlinks, permission errors, etc.)
-      }
+      } catch (_) {}
     }
     entries.sort((a, b) {
       if (a.isDir != b.isDir) return a.isDir ? -1 : 1;
@@ -79,19 +83,57 @@ class FileAccessService {
     return entries;
   }
 
-  /// Read a text file and return its content. Throws if the file is missing,
-  /// too large, or can't be decoded as UTF-8 (binary).
-  static Future<String> readTextFile(String path) async {
+  /// Read the first [previewBytes] bytes and attempt UTF-8 decode. Returns
+  /// the preview text and whether the file appears to be binary.
+  static Future<({String text, bool isBinary, int totalSize})> readPreview(
+      String path) async {
+    final file = File(path);
+    if (!await file.exists()) throw Exception('File not found: $path');
+    final totalSize = await file.length();
+    final limit = totalSize < previewBytes ? totalSize : previewBytes;
+    final bytes = <int>[];
+    await file.openRead(0, limit).forEach(bytes.addAll);
+    try {
+      final text = utf8.decode(bytes, allowMalformed: false);
+      return (text: text, isBinary: false, totalSize: totalSize);
+    } catch (_) {
+      return (text: '', isBinary: true, totalSize: totalSize);
+    }
+  }
+
+  /// Read the full file in [chunkSize]-byte blocks, calling [onChunk] for each.
+  /// [onChunk] receives (chunkIndex, base64EncodedBytes, totalChunks).
+  /// Throws if the file is missing or exceeds [maxDownloadBytes].
+  static Future<void> readChunked(
+    String path,
+    Future<void> Function(int index, String base64Data, int total) onChunk,
+  ) async {
     final file = File(path);
     if (!await file.exists()) throw Exception('File not found: $path');
     final size = await file.length();
-    if (size > maxTextBytes) {
-      throw Exception('File too large (${(size / 1024).round()} KB — limit is 64 KB)');
+    if (size > maxDownloadBytes) {
+      throw Exception(
+          'File too large to download (${(size / (1024 * 1024)).toStringAsFixed(1)} MB — limit is 50 MB)');
     }
+    final total = size == 0 ? 1 : (size / chunkSize).ceil();
+    final raf = await file.open();
     try {
-      return await file.readAsString();
-    } catch (_) {
-      throw Exception('Binary file — cannot display as text');
+      int index = 0;
+      int offset = 0;
+      while (offset < size || (size == 0 && index == 0)) {
+        final count = (size - offset).clamp(0, chunkSize);
+        final bytes = count > 0 ? await raf.read(count) : Uint8List(0);
+        final b64 = base64.encode(bytes);
+        await onChunk(index, b64, total);
+        index++;
+        offset += count;
+        if (size == 0) break; // empty file
+        // Yield to the event loop between chunks to keep the app responsive
+        // and avoid saturating the data-channel send buffer.
+        await Future<void>.delayed(Duration.zero);
+      }
+    } finally {
+      await raf.close();
     }
   }
 

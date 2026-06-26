@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -63,12 +65,23 @@ class CallController extends ChangeNotifier {
   List<String> permittedFolders = [];   // HOST: folders shared with viewer
   bool filesAvailable = false;           // VIEWER: host has shared folders
   List<String> availableFolders = [];    // VIEWER: folder list from host
-  // Last file-browse response received from the host (viewer side). Both are
-  // cleared to null after the panel reads them via [takeFileListResult] /
-  // [takeFileDataResult] / [takeFileErrorResult].
+
+  // ── File-browse results (viewer side, cleared after read) ──────────────────
   ({String path, List<FileEntry> entries})? fileListResult;
-  ({String path, String text})? fileDataResult;
+  ({String path, String text, bool isBinary, int totalSize})? filePreviewResult;
   ({String path, String error})? fileErrorResult;
+
+  // ── Chunked download state (viewer side) ───────────────────────────────────
+  bool isDownloading = false;
+  String downloadPath = '';
+  String downloadName = '';
+  int downloadTotalChunks = 0;
+  int downloadDoneChunks = 0;
+  double get downloadProgress =>
+      downloadTotalChunks == 0 ? 0 : downloadDoneChunks / downloadTotalChunks;
+  // Assembled bytes ready to save — cleared after caller reads it.
+  ({String name, Uint8List bytes})? downloadReady;
+  String? downloadError;
 
   String status = 'Idle';
   String? sessionId;
@@ -87,6 +100,7 @@ class CallController extends ChangeNotifier {
   String? _pinHash;
 
   final List<String> log = [];
+  final List<String> _downloadChunks = []; // base64 chunk accumulator
 
   bool _hostSessionCreated = false; // guard against duplicate sessions on reconnect
   bool _iceRestarting = false; // guard against repeated ICE restarts
@@ -269,8 +283,16 @@ class CallController extends ChangeNotifier {
         filesAvailable = false;
         availableFolders = [];
         fileListResult = null;
-        fileDataResult = null;
+        filePreviewResult = null;
         fileErrorResult = null;
+        isDownloading = false;
+        downloadPath = '';
+        downloadName = '';
+        downloadTotalChunks = 0;
+        downloadDoneChunks = 0;
+        downloadReady = null;
+        downloadError = null;
+        _downloadChunks.clear();
       }
       _addLog('Peer left');
       _setStatus('Peer disconnected');
@@ -655,34 +677,64 @@ class CallController extends ChangeNotifier {
     _webrtc.sendData(jsonEncode({'t': 'reqfilelist', 'path': path}));
   }
 
-  /// VIEWER: request file content from the host.
-  void requestFile(String path) {
+  /// VIEWER: request a 2 KB text preview of a file.
+  void requestFilePreview(String path) {
     if (!dataChannelOpen) return;
-    _webrtc.sendData(jsonEncode({'t': 'reqfile', 'path': path}));
+    _webrtc.sendData(jsonEncode({'t': 'reqpreview', 'path': path}));
   }
 
-  /// Consume and return the latest file-list response (clears it after read).
+  /// VIEWER: start a chunked download of a file from the host.
+  void requestFileDownload(String path) {
+    if (!dataChannelOpen || isDownloading) return;
+    isDownloading = true;
+    downloadPath = path;
+    downloadTotalChunks = 0;
+    downloadDoneChunks = 0;
+    downloadError = null;
+    downloadReady = null;
+    _downloadChunks.clear();
+    notifyListeners();
+    _webrtc.sendData(jsonEncode({'t': 'reqdl', 'path': path}));
+  }
+
+  /// Cancel an in-progress download (viewer-initiated).
+  void cancelDownload() {
+    isDownloading = false;
+    downloadPath = '';
+    downloadTotalChunks = 0;
+    downloadDoneChunks = 0;
+    _downloadChunks.clear();
+    notifyListeners();
+  }
+
+  // ── Take-and-clear helpers (panel reads these after notifyListeners) ────────
+
   ({String path, List<FileEntry> entries})? takeFileListResult() {
     final r = fileListResult;
     fileListResult = null;
     return r;
   }
 
-  /// Consume and return the latest file-data response (clears it after read).
-  ({String path, String text})? takeFileDataResult() {
-    final r = fileDataResult;
-    fileDataResult = null;
+  ({String path, String text, bool isBinary, int totalSize})? takeFilePreviewResult() {
+    final r = filePreviewResult;
+    filePreviewResult = null;
     return r;
   }
 
-  /// Consume and return the latest file-error response (clears it after read).
   ({String path, String error})? takeFileErrorResult() {
     final r = fileErrorResult;
     fileErrorResult = null;
     return r;
   }
 
-  /// HOST: handle an incoming reqfilelist message from the viewer.
+  ({String name, Uint8List bytes})? takeDownloadReady() {
+    final r = downloadReady;
+    downloadReady = null;
+    return r;
+  }
+
+  // ── HOST-SIDE handlers ──────────────────────────────────────────────────────
+
   Future<void> _handleFileListRequest(String path) async {
     if (!FileAccessService.isAllowed(path, permittedFolders)) {
       _sendFileError(path, 'Access denied');
@@ -700,17 +752,59 @@ class CallController extends ChangeNotifier {
     }
   }
 
-  /// HOST: handle an incoming reqfile message from the viewer.
-  Future<void> _handleFileRequest(String path) async {
+  Future<void> _handlePreviewRequest(String path) async {
     if (!FileAccessService.isAllowed(path, permittedFolders)) {
       _sendFileError(path, 'Access denied');
       return;
     }
     try {
-      final text = await FileAccessService.readTextFile(path);
-      _webrtc.sendData(jsonEncode({'t': 'filedata', 'path': path, 'text': text}));
+      final result = await FileAccessService.readPreview(path);
+      _webrtc.sendData(jsonEncode({
+        't': 'preview',
+        'path': path,
+        'text': result.isBinary ? '' : result.text,
+        'bin': result.isBinary,
+        'size': result.totalSize,
+      }));
     } catch (e) {
       _sendFileError(path, e.toString());
+    }
+  }
+
+  Future<void> _handleDownloadRequest(String path) async {
+    if (!FileAccessService.isAllowed(path, permittedFolders)) {
+      _sendFileError(path, 'Access denied');
+      return;
+    }
+    try {
+      final name = path.split('/').last;
+      final file = await () async {
+        // We need the file size for dlstart; do a quick stat.
+        final f = File(path);
+        final size = await f.length();
+        return (size: size, name: name);
+      }();
+      // Announce the transfer so the viewer can show a progress bar.
+      final totalSize = file.size;
+      final totalChunks =
+          totalSize == 0 ? 1 : (totalSize / FileAccessService.chunkSize).ceil();
+      _webrtc.sendData(jsonEncode({
+        't': 'dlstart',
+        'path': path,
+        'name': name,
+        'size': totalSize,
+        'total': totalChunks,
+      }));
+      // Stream chunks.
+      await FileAccessService.readChunked(path, (idx, b64, total) async {
+        _webrtc.sendData(jsonEncode({'t': 'dlchunk', 'i': idx, 'd': b64}));
+      });
+      // Signal completion.
+      _webrtc.sendData(jsonEncode({'t': 'dlend', 'path': path}));
+      _addLog('Download sent: $name');
+    } catch (e) {
+      _webrtc.sendData(jsonEncode({'t': 'dlerr', 'path': path, 'm': e.toString()}));
+      _addLog('Download error: $e');
     }
   }
 
@@ -782,15 +876,18 @@ class CallController extends ChangeNotifier {
       return true;
     }
     if (role == Role.host && t == 'reqfilelist') {
-      final path = data['path'] as String? ?? '';
-      _handleFileListRequest(path); // async, fire-and-forget
+      _handleFileListRequest(data['path'] as String? ?? '');
       return true;
     }
-    if (role == Role.host && t == 'reqfile') {
-      final path = data['path'] as String? ?? '';
-      _handleFileRequest(path); // async, fire-and-forget
+    if (role == Role.host && t == 'reqpreview') {
+      _handlePreviewRequest(data['path'] as String? ?? '');
       return true;
     }
+    if (role == Role.host && t == 'reqdl') {
+      _handleDownloadRequest(data['path'] as String? ?? '');
+      return true;
+    }
+    // ── Viewer receives responses ──────────────────────────────────────────
     if (role == Role.viewer && t == 'filelist') {
       final path = data['path'] as String? ?? '';
       final rawEntries = data['entries'];
@@ -804,10 +901,50 @@ class CallController extends ChangeNotifier {
       notifyListeners();
       return true;
     }
-    if (role == Role.viewer && t == 'filedata') {
-      final path = data['path'] as String? ?? '';
-      final text = data['text'] as String? ?? '';
-      fileDataResult = (path: path, text: text);
+    if (role == Role.viewer && t == 'preview') {
+      filePreviewResult = (
+        path: data['path'] as String? ?? '',
+        text: data['text'] as String? ?? '',
+        isBinary: data['bin'] == true,
+        totalSize: (data['size'] as num?)?.toInt() ?? 0,
+      );
+      notifyListeners();
+      return true;
+    }
+    if (role == Role.viewer && t == 'dlstart') {
+      downloadPath = data['path'] as String? ?? '';
+      downloadName = data['name'] as String? ?? '';
+      downloadTotalChunks = (data['total'] as num?)?.toInt() ?? 0;
+      downloadDoneChunks = 0;
+      isDownloading = true;
+      downloadError = null;
+      _downloadChunks.clear();
+      notifyListeners();
+      return true;
+    }
+    if (role == Role.viewer && t == 'dlchunk') {
+      final b64 = data['d'] as String? ?? '';
+      _downloadChunks.add(b64);
+      downloadDoneChunks = _downloadChunks.length;
+      notifyListeners();
+      return true;
+    }
+    if (role == Role.viewer && t == 'dlend') {
+      // Assemble all base64 chunks into a single Uint8List.
+      final all = _downloadChunks
+          .expand((b64) => base64.decode(b64))
+          .toList();
+      downloadReady = (name: downloadName, bytes: Uint8List.fromList(all));
+      isDownloading = false;
+      _downloadChunks.clear();
+      _addLog('Download complete: $downloadName');
+      notifyListeners();
+      return true;
+    }
+    if (role == Role.viewer && t == 'dlerr') {
+      downloadError = data['m'] as String? ?? 'Download failed';
+      isDownloading = false;
+      _downloadChunks.clear();
       notifyListeners();
       return true;
     }
@@ -815,6 +952,12 @@ class CallController extends ChangeNotifier {
       final path = data['path'] as String? ?? '';
       final msg = data['msg'] as String? ?? 'Unknown error';
       fileErrorResult = (path: path, error: msg);
+      // Also cancel any in-progress download if the error matches our path.
+      if (isDownloading && path == downloadPath) {
+        downloadError = msg;
+        isDownloading = false;
+        _downloadChunks.clear();
+      }
       notifyListeners();
       return true;
     }
