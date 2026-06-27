@@ -75,6 +75,7 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
     // Re-check after the user returns from a system settings screen.
     if (state == AppLifecycleState.resumed) {
       _controller.refreshBatteryOptimization();
+      _controller.refreshNotificationAccess();
     }
   }
 
@@ -288,6 +289,14 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
                   ],
                   if (!kIsWeb) ...[
                     const SizedBox(height: 8),
+                    _NotificationCard(controller: _controller),
+                  ],
+                  if (!kIsWeb) ...[
+                    const SizedBox(height: 8),
+                    _CaptureCard(controller: _controller),
+                  ],
+                  if (!kIsWeb) ...[
+                    const SizedBox(height: 8),
                     _SharedFoldersCard(controller: _controller),
                   ],
                   const SizedBox(height: 8),
@@ -418,6 +427,145 @@ class _LocationCard extends StatelessWidget {
                   style: TextStyle(fontSize: 12, color: Colors.grey),
                 ),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// HOST: card to mirror social-media / app notifications to the viewer in
+/// real time. SMS, phone calls, and OTP messages are always excluded.
+class _NotificationCard extends StatelessWidget {
+  const _NotificationCard({required this.controller});
+
+  final CallController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final accessGranted = controller.notificationAccessGranted;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.notifications_active),
+                const SizedBox(width: 8),
+                const Expanded(child: Text('Mirror notifications to viewer')),
+                Switch(
+                  value: controller.notificationsAllowed,
+                  onChanged: (v) => v
+                      ? controller.allowNotifications()
+                      : controller.disallowNotifications(),
+                ),
+              ],
+            ),
+            // Show a prompt when access hasn't been granted yet.
+            if (!accessGranted)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                        color: Colors.orange.withValues(alpha: 0.4)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.warning_amber_rounded,
+                          size: 18, color: Colors.orange),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Notification access required.',
+                          style:
+                              TextStyle(fontSize: 12, color: Colors.orange),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed:
+                            SystemService.requestNotificationAccess,
+                        style: TextButton.styleFrom(
+                            padding: EdgeInsets.zero,
+                            tapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap),
+                        child: const Text('Grant',
+                            style: TextStyle(fontSize: 12)),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            if (controller.notificationsAllowed && accessGranted)
+              const Padding(
+                padding: EdgeInsets.only(top: 4),
+                child: Text(
+                  'Social media & app alerts are forwarded to the viewer. '
+                  'SMS and OTPs are never sent.',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+            if (!controller.notificationsAllowed)
+              const Padding(
+                padding: EdgeInsets.only(top: 4),
+                child: Text(
+                  'Viewer sees your app notifications in real time '
+                  '(social media, chat apps, etc.).',
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// HOST: card to grant or revoke the viewer's ability to screenshot/record.
+class _CaptureCard extends StatelessWidget {
+  const _CaptureCard({required this.controller});
+
+  final CallController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.screenshot_monitor),
+                const SizedBox(width: 8),
+                const Expanded(
+                    child: Text('Allow viewer to screenshot & record')),
+                Switch(
+                  value: controller.captureAllowed,
+                  onChanged: (v) => v
+                      ? controller.allowCapture()
+                      : controller.disallowCapture(),
+                ),
+              ],
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                controller.captureAllowed
+                    ? 'Viewer can save screenshots (PNG) and recordings (MP4) '
+                        'of what appears in their session window.'
+                    : 'Viewer cannot capture screenshots or recordings while '
+                        'this is off.',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ),
           ],
         ),
       ),

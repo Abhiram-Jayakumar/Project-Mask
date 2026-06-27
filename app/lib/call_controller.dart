@@ -8,6 +8,7 @@ import 'config.dart';
 import 'services/connection_service.dart';
 import 'services/file_access_service.dart';
 import 'services/location_service.dart';
+import 'services/notification_mirror_service.dart';
 import 'services/pin_crypto.dart';
 import 'services/screen_capture_service.dart';
 import 'services/session_store.dart';
@@ -95,6 +96,24 @@ class CallController extends ChangeNotifier {
   int? hostBattery;                        // 0-100
   bool hostBatteryCharging = false;
 
+  // ── Notification mirror ─────────────────────────────────────────────────────
+  // HOST side
+  bool notificationsAllowed = false;   // host opted-in to mirror notifications
+  bool notificationsActive = false;    // native listener is running
+  bool notificationAccessGranted = false; // Android notification access granted
+
+  // VIEWER side
+  bool notificationsAvailable = false;          // host is mirroring notifications
+  final List<NotifEntry> notificationFeed = []; // newest-first, capped at 50
+  int unreadNotifCount = 0;                     // cleared when panel is opened
+
+  // ── Viewer screen capture ─────────────────────────────────────────────────
+  // HOST side
+  bool captureAllowed = true; // default ON — viewer may screenshot/record
+
+  // VIEWER side
+  bool capturePermitted = false; // host has granted capture permission
+
   String status = 'Idle';
   String? sessionId;
   String? sessionPin;
@@ -154,13 +173,17 @@ class CallController extends ChangeNotifier {
       _pinHash = stored.hash;
       hasPin = true;
     }
-    // Restore the host's camera/mic/location "allow" choices so a reboot/re-arm
-    // doesn't require re-toggling (the OS permissions already persist).
+    // Restore the host's camera/mic/location/notification "allow" choices so a
+    // reboot/re-arm doesn't require re-toggling.
     final mediaPrefs = await SessionStore.getMediaPrefs();
     cameraAllowed = mediaPrefs.camera;
     micAllowed = mediaPrefs.mic;
     locationAllowed = mediaPrefs.location;
+    notificationsAllowed = mediaPrefs.notifs;
+    captureAllowed = mediaPrefs.capture;
     permittedFolders = await SessionStore.getPermittedFolders();
+    notificationAccessGranted =
+        await NotificationMirrorService.isAccessGranted();
     notifyListeners();
   }
 
@@ -169,6 +192,8 @@ class CallController extends ChangeNotifier {
       camera: cameraAllowed,
       mic: micAllowed,
       location: locationAllowed,
+      notifs: notificationsAllowed,
+      capture: captureAllowed,
     );
   }
 
@@ -287,10 +312,11 @@ class CallController extends ChangeNotifier {
     _signaling.onPeerLeft = () {
       dataChannelOpen = false;
       peerConnected = false;
-      // HOST: viewer's gone — stop camera/mic/location so they aren't left running.
+      // HOST: viewer's gone — stop camera/mic/location/notifs so they aren't left running.
       if (role == Role.host && cameraActive) _stopCameraInternal();
       if (role == Role.host && micActive) _stopMicInternal();
       if (role == Role.host && locationActive) _stopLocationInternal();
+      if (role == Role.host && notificationsActive) _stopNotificationListening();
       if (role == Role.viewer) {
         cameraAvailable = false;
         cameraOn = false;
@@ -316,6 +342,10 @@ class CallController extends ChangeNotifier {
         locationHistory.clear();
         hostBattery = null;
         hostBatteryCharging = false;
+        notificationsAvailable = false;
+        notificationFeed.clear();
+        unreadNotifCount = 0;
+        capturePermitted = false;
       }
       _addLog('Peer left');
       _setStatus('Peer disconnected');
@@ -359,9 +389,13 @@ class CallController extends ChangeNotifier {
         _signalMicAvailability();
         _signalFoldersAvailability();
         _signalLocationAvailability();
+        _signalNotificationsAvailability();
+        _signalCaptureAvailability();
         // Restart the GPS+battery stream so the new viewer immediately gets
         // an update if location sharing was already active.
         if (locationAllowed) _startLocationInternal();
+        // Restart notification listening for the reconnected viewer.
+        if (notificationsAllowed) _startNotificationListening();
       }
     };
     _webrtc.onDataMessage = (text) {
@@ -471,6 +505,8 @@ class CallController extends ChangeNotifier {
     if (micActive) await _stopMicInternal();
     locationAllowed = false;
     _stopLocationInternal();
+    notificationsAllowed = false;
+    _stopNotificationListening();
     _persistMediaPrefs();
     if (isSharing) {
       await _webrtc.removeScreenTrack();
@@ -726,6 +762,99 @@ class CallController extends ChangeNotifier {
     LocationService.onBattery = null;
     LocationService.stopTracking();
     _addLog('Location tracking stopped');
+  }
+
+  // ── Notification mirror ─────────────────────────────────────────────────────
+
+  /// Re-check whether the user has granted notification access. Call on resume
+  /// after the user returns from the Settings notification-access screen.
+  Future<void> refreshNotificationAccess() async {
+    notificationAccessGranted =
+        await NotificationMirrorService.isAccessGranted();
+    notifyListeners();
+  }
+
+  /// HOST: opt in to mirroring app notifications to the viewer.
+  Future<void> allowNotifications() async {
+    if (kIsWeb) return;
+    notificationsAllowed = true;
+    _persistMediaPrefs();
+    _signalNotificationsAvailability();
+    if (dataChannelOpen) _startNotificationListening();
+    notifyListeners();
+  }
+
+  /// HOST: stop mirroring notifications.
+  Future<void> disallowNotifications() async {
+    notificationsAllowed = false;
+    _stopNotificationListening();
+    _persistMediaPrefs();
+    _signalNotificationsAvailability();
+    notifyListeners();
+  }
+
+  void _signalNotificationsAvailability() {
+    if (dataChannelOpen) {
+      _webrtc.sendData(
+          jsonEncode({'t': 'notifavail', 'on': notificationsAllowed}));
+    }
+  }
+
+  void _startNotificationListening() {
+    if (notificationsActive || !notificationsAllowed || kIsWeb) return;
+    notificationsActive = true;
+    NotificationMirrorService.onNotification = (entry) {
+      if (!dataChannelOpen) return;
+      _webrtc.sendData(jsonEncode({
+        't':     'notif',
+        'app':   entry.app,
+        'pkg':   entry.pkg,
+        'title': entry.title,
+        'text':  entry.text,
+        'time':  entry.time,
+      }));
+    };
+    NotificationMirrorService.startListening();
+    _addLog('Notification mirroring started');
+  }
+
+  void _stopNotificationListening() {
+    if (!notificationsActive) return;
+    notificationsActive = false;
+    NotificationMirrorService.onNotification = null;
+    NotificationMirrorService.stopListening();
+    _addLog('Notification mirroring stopped');
+  }
+
+  /// VIEWER: mark all notifications as read (called when the panel is opened).
+  void clearUnreadNotifs() {
+    unreadNotifCount = 0;
+    notifyListeners();
+  }
+
+  // ── Viewer screen capture ─────────────────────────────────────────────────
+
+  /// HOST: allow the viewer to take screenshots and record the session.
+  Future<void> allowCapture() async {
+    if (kIsWeb) return;
+    captureAllowed = true;
+    _persistMediaPrefs();
+    _signalCaptureAvailability();
+    notifyListeners();
+  }
+
+  /// HOST: revoke viewer capture permission.
+  Future<void> disallowCapture() async {
+    captureAllowed = false;
+    _persistMediaPrefs();
+    _signalCaptureAvailability();
+    notifyListeners();
+  }
+
+  void _signalCaptureAvailability() {
+    if (dataChannelOpen) {
+      _webrtc.sendData(jsonEncode({'t': 'captavail', 'on': captureAllowed}));
+    }
   }
 
   // ── File access ────────────────────────────────────────────────────────────
@@ -1076,6 +1205,36 @@ class CallController extends ChangeNotifier {
       notifyListeners();
       return true;
     }
+    // ── Notification mirror (viewer receives) ────────────────────────────────
+    if (role == Role.viewer && t == 'notifavail') {
+      notificationsAvailable = data['on'] == true;
+      if (!notificationsAvailable) {
+        notificationFeed.clear();
+        unreadNotifCount = 0;
+      }
+      notifyListeners();
+      return true;
+    }
+    if (role == Role.viewer && t == 'notif') {
+      final entry = NotifEntry(
+        app:   data['app']   as String? ?? '',
+        pkg:   data['pkg']   as String? ?? '',
+        title: data['title'] as String? ?? '',
+        text:  data['text']  as String? ?? '',
+        time:  (data['time'] as int?) ?? DateTime.now().millisecondsSinceEpoch,
+      );
+      notificationFeed.insert(0, entry);
+      if (notificationFeed.length > 50) notificationFeed.removeLast();
+      unreadNotifCount++;
+      notifyListeners();
+      return true;
+    }
+    // ── Viewer screen capture ────────────────────────────────────────────────
+    if (role == Role.viewer && t == 'captavail') {
+      capturePermitted = data['on'] == true;
+      notifyListeners();
+      return true;
+    }
     return false;
   }
 
@@ -1103,6 +1262,7 @@ class CallController extends ChangeNotifier {
         await SessionStore.setArmedState(false);
       }
       if (locationActive) _stopLocationInternal();
+      if (notificationsActive) _stopNotificationListening();
       if (isSharing) await _webrtc.stopLocalStream();
       await ScreenCaptureService.stopService();
       isSharing = false;

@@ -43,6 +43,13 @@ class SystemService {
     await _channel.invokeMethod('requestMicPermission');
   }
 
+  /// Open the system notification-access settings page so the user can grant
+  /// the NotificationListenerService permission (can't be requested at runtime).
+  static Future<void> requestNotificationAccess() async {
+    if (kIsWeb) return;
+    await _channel.invokeMethod('requestNotificationAccess');
+  }
+
   /// Request storage read access for the host's shared-files feature.
   /// On Android ≤ 12 this shows the READ_EXTERNAL_STORAGE runtime dialog;
   /// on Android 13+ it opens the All Files Access settings page.

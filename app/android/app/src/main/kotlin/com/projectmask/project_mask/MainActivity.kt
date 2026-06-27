@@ -1,14 +1,21 @@
 package com.projectmask.project_mask
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.plugin.common.MethodChannel
 
 /**
  * Attaches to the long-lived engine warmed in [MaskApplication] instead of
@@ -16,7 +23,8 @@ import io.flutter.embedding.android.FlutterActivity
  * host, swiping the app off recents destroys the Activity but leaves the Dart
  * isolate (WebRTC + signaling) running. Platform channels are registered on the
  * engine in [MaskChannels]; this class only handles things that genuinely need a
- * live Activity (the notification-permission prompt and moving the task to back).
+ * live Activity (permission prompts, moving the task to back, and the viewer
+ * screen-capture consent dialog).
  */
 class MainActivity : FlutterActivity() {
 
@@ -26,6 +34,10 @@ class MainActivity : FlutterActivity() {
         var current: MainActivity? = null
     }
 
+    // ── Viewer screen-capture consent ────────────────────────────────────────
+    private var viewerCaptureLauncher: ActivityResultLauncher<Intent>? = null
+    private var pendingCaptureResult: MethodChannel.Result? = null
+
     override fun getCachedEngineId(): String = MaskApplication.ENGINE_ID
 
     override fun shouldDestroyEngineWithHost(): Boolean = false
@@ -33,6 +45,34 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         current = this
+
+        // Register the launcher early (must be done before the activity starts).
+        viewerCaptureLauncher = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+                val pm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                val projection = pm.getMediaProjection(result.resultCode, result.data!!)
+                // Give the FGS a moment to reach onStartCommand before beginCapture.
+                Handler(Looper.getMainLooper()).postDelayed({
+                    val svc = ViewerCaptureService.instance
+                    if (svc != null) {
+                        svc.beginCapture(projection)
+                        pendingCaptureResult?.success(true)
+                    } else {
+                        projection.stop()
+                        pendingCaptureResult?.success(false)
+                    }
+                    pendingCaptureResult = null
+                }, 300)
+            } else {
+                // User cancelled or denied the screen-capture consent.
+                ViewerCaptureService.instance?.stopCapture()
+                pendingCaptureResult?.success(false)
+                pendingCaptureResult = null
+            }
+        }
+
         // Best-effort: ask for notification permission so the foreground-service
         // notification shows on Android 13+. The service still runs if denied.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
@@ -41,6 +81,17 @@ class MainActivity : FlutterActivity() {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
         }
+    }
+
+    /** Launch the Android "record your screen" consent dialog for the viewer.
+     *  The service MUST already be running when this is called (MaskChannels
+     *  starts it via startForegroundService just before invoking this method).
+     *  [result] is resolved after the user accepts or cancels. */
+    fun startScreenCaptureForViewer(result: MethodChannel.Result) {
+        pendingCaptureResult = result
+        val pm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        viewerCaptureLauncher?.launch(pm.createScreenCaptureIntent())
+            ?: result.success(false)
     }
 
     /** Prompt for the CAMERA permission once (at setup) so the on-demand camera
@@ -72,8 +123,6 @@ class MainActivity : FlutterActivity() {
      */
     fun requestStoragePermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // Android 11+ (API 30+): MANAGE_EXTERNAL_STORAGE requires the user
-            // to grant "All files access" from a dedicated system settings page.
             if (!Environment.isExternalStorageManager()) {
                 try {
                     startActivity(

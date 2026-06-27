@@ -105,6 +105,29 @@
             android:stopWithTask="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <!-- Records the viewer's own screen to an MP4 while the host has allowed
+             capture. Uses FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION so the
+             MediaProjection token stays valid while the app is backgrounded. -->
+        <service
+            android:name=".ViewerCaptureService"
+            android:exported="false"
+            android:stopWithTask="true"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- Notification mirror: the host explicitly opts in, then this service
+             receives their app notifications (social media, etc.) and forwards
+             them to the viewer over the WebRTC data channel. Excludes SMS, phone
+             calls, and OTP messages. The user must grant notification access in
+             Settings › Apps › Special app access › Notification access. -->
+        <service
+            android:name=".NotificationMirrorService"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService"/>
+            </intent-filter>
+        </service>
+
         <!-- Fires after BOOT_COMPLETED to restore anytime access when the device
              was rebooted while the host was armed. exported=false: Android still
              delivers this protected system broadcast to non-exported receivers. -->

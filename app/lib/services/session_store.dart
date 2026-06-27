@@ -83,26 +83,34 @@ class SessionStore {
   static const _kCameraAllowed = 'camera_allowed';
   static const _kMicAllowed = 'mic_allowed';
   static const _kLocationAllowed = 'location_allowed';
+  static const _kNotifsAllowed = 'notifs_allowed';
+  static const _kCaptureAllowed = 'capture_allowed';
 
-  /// Persist the host's "let the viewer see/hear/locate me" choices so they
-  /// survive a reboot — after re-arming the host doesn't have to re-toggle.
+  /// Persist the host's media sharing preferences so they survive a reboot.
   static Future<void> setMediaPrefs({
     required bool camera,
     required bool mic,
     required bool location,
+    required bool notifs,
+    required bool capture,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_kCameraAllowed, camera);
     await prefs.setBool(_kMicAllowed, mic);
     await prefs.setBool(_kLocationAllowed, location);
+    await prefs.setBool(_kNotifsAllowed, notifs);
+    await prefs.setBool(_kCaptureAllowed, capture);
   }
 
-  static Future<({bool camera, bool mic, bool location})> getMediaPrefs() async {
+  static Future<({bool camera, bool mic, bool location, bool notifs, bool capture})>
+      getMediaPrefs() async {
     final prefs = await SharedPreferences.getInstance();
     return (
-      camera: prefs.getBool(_kCameraAllowed) ?? false,
-      mic: prefs.getBool(_kMicAllowed) ?? false,
+      camera:   prefs.getBool(_kCameraAllowed) ?? false,
+      mic:      prefs.getBool(_kMicAllowed) ?? false,
       location: prefs.getBool(_kLocationAllowed) ?? false,
+      notifs:   prefs.getBool(_kNotifsAllowed) ?? false,
+      capture:  prefs.getBool(_kCaptureAllowed) ?? true,
     );
   }
 

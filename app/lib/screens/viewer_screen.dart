@@ -1,13 +1,18 @@
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../call_controller.dart';
+import '../services/capture_service.dart';
 import '../services/system_service.dart';
 import '../widgets/connection_panel.dart';
 import '../widgets/file_browser_panel.dart';
 import '../widgets/keep_alive_cards.dart';
 import '../widgets/location_map_panel.dart';
+import '../widgets/notification_panel.dart';
 import '../widgets/remote_control_surface.dart';
 
 /// Viewer = the controlling device. Enters a session ID + PIN, watches the host's
@@ -34,6 +39,10 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
   bool _showHostCam = false;  // viewer chose to view the host's camera tile
   bool _cameraExpanded = false; // camera is shown full-frame (over screen share)
   bool _listenHost = false;   // viewer chose to listen to the host's mic
+
+  // Screen capture (screenshot + recording) — permitted by host toggle.
+  final GlobalKey _captureKey = GlobalKey();
+  bool _isRecording = false;
 
   @override
   void initState() {
@@ -108,8 +117,58 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
         )
       : const SizedBox.shrink();
 
+  Future<void> _takeScreenshot() async {
+    if (!_controller.capturePermitted) return;
+    try {
+      final boundary = _captureKey.currentContext?.findRenderObject()
+          as RenderRepaintBoundary?;
+      if (boundary == null) return;
+      final image = await boundary.toImage(pixelRatio: 2.0);
+      final byteData =
+          await image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) return;
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      await CaptureService.saveImageToGallery(
+          'screenshot_$ts.png', byteData.buffer.asUint8List());
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Screenshot saved to gallery')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Screenshot failed: $e')));
+      }
+    }
+  }
+
+  Future<void> _startRecording() async {
+    if (!_controller.capturePermitted || _isRecording) return;
+    final started = await CaptureService.startRecording();
+    if (mounted) {
+      setState(() => _isRecording = started);
+      if (started) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Recording started')));
+      }
+    }
+  }
+
+  Future<void> _stopRecording() async {
+    if (!_isRecording) return;
+    final path = await CaptureService.stopRecording();
+    if (mounted) {
+      setState(() => _isRecording = false);
+      if (path.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Recording saved to Downloads')));
+      }
+    }
+  }
+
   @override
   void dispose() {
+    if (_isRecording) CaptureService.stopRecording(); // fire-and-forget
     // Always restore system UI when leaving the viewer.
     if (_fullscreen) SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     WidgetsBinding.instance.removeObserver(this);
@@ -160,7 +219,9 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
 
             // ── Fullscreen mode ─────────────────────────────────────────────
             if (_fullscreen) {
-              return Stack(
+              return RepaintBoundary(
+                key: _captureKey,
+                child: Stack(
                 fit: StackFit.expand,
                 children: [
                   ColoredBox(
@@ -240,6 +301,32 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                           ),
                           const SizedBox(width: 8),
                         ],
+                        if (_controller.notificationsAvailable) ...[
+                          _NotifIconButton(
+                            unread: _controller.unreadNotifCount,
+                            onTap: () => NotificationPanel.show(
+                              context,
+                              _controller,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        if (_controller.capturePermitted) ...[
+                          _CircleIconButton(
+                            icon: Icons.camera_alt,
+                            onTap: _takeScreenshot,
+                          ),
+                          const SizedBox(width: 8),
+                          _CircleIconButton(
+                            icon: _isRecording
+                                ? Icons.stop
+                                : Icons.fiber_manual_record,
+                            onTap: _isRecording
+                                ? _stopRecording
+                                : _startRecording,
+                          ),
+                          const SizedBox(width: 8),
+                        ],
                         _CircleIconButton(
                           icon: Icons.fullscreen_exit,
                           onTap: _exitFullscreen,
@@ -248,6 +335,7 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                     ),
                   ),
                 ],
+              ),
               );
             }
 
@@ -341,7 +429,9 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                               child: Stack(
                                 alignment: Alignment.bottomRight,
                                 children: [
-                                  SizedBox(
+                                  RepaintBoundary(
+                                    key: _captureKey,
+                                    child: SizedBox(
                                     width: frameW,
                                     height: frameH,
                                     child: Container(
@@ -405,6 +495,7 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                       ),
                                     ),
                                   ),
+                                  ),
                                   // Overlay controls: view-host toggle + fullscreen.
                                   Padding(
                                     padding: const EdgeInsets.all(10),
@@ -443,6 +534,32 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                               context,
                                               _controller,
                                             ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                        ],
+                                        if (_controller.notificationsAvailable) ...[
+                                          _NotifIconButton(
+                                            unread: _controller.unreadNotifCount,
+                                            onTap: () => NotificationPanel.show(
+                                              context,
+                                              _controller,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 8),
+                                        ],
+                                        if (_controller.capturePermitted) ...[
+                                          _CircleIconButton(
+                                            icon: Icons.camera_alt,
+                                            onTap: _takeScreenshot,
+                                          ),
+                                          const SizedBox(width: 8),
+                                          _CircleIconButton(
+                                            icon: _isRecording
+                                                ? Icons.stop
+                                                : Icons.fiber_manual_record,
+                                            onTap: _isRecording
+                                                ? _stopRecording
+                                                : _startRecording,
                                           ),
                                           const SizedBox(width: 8),
                                         ],
@@ -526,6 +643,76 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                     ],
                                   ],
                                 ),
+                              ),
+                            ],
+                            // Notifications — visible when the host mirrors them.
+                            if (connected &&
+                                _controller.notificationsAvailable) ...[
+                              const SizedBox(height: 8),
+                              OutlinedButton.icon(
+                                onPressed: () => NotificationPanel.show(
+                                  context,
+                                  _controller,
+                                ),
+                                icon: const Icon(
+                                    Icons.notifications_active),
+                                style: OutlinedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                      vertical: 14),
+                                ),
+                                label: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Text('Notifications'),
+                                    if (_controller.unreadNotifCount > 0) ...[
+                                      const SizedBox(width: 8),
+                                      _UnreadBadge(
+                                          count: _controller.unreadNotifCount),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ],
+                            // Screenshot + record — visible when the host allows capture.
+                            if (connected && _controller.capturePermitted) ...[
+                              const SizedBox(height: 8),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: OutlinedButton.icon(
+                                      onPressed: _takeScreenshot,
+                                      icon: const Icon(Icons.camera_alt),
+                                      style: OutlinedButton.styleFrom(
+                                        padding: const EdgeInsets.symmetric(
+                                            vertical: 14),
+                                      ),
+                                      label: const Text('Screenshot'),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: OutlinedButton.icon(
+                                      onPressed: _isRecording
+                                          ? _stopRecording
+                                          : _startRecording,
+                                      icon: Icon(
+                                        _isRecording
+                                            ? Icons.stop
+                                            : Icons.fiber_manual_record,
+                                        color: _isRecording ? Colors.red : null,
+                                      ),
+                                      style: OutlinedButton.styleFrom(
+                                        padding: const EdgeInsets.symmetric(
+                                            vertical: 14),
+                                        foregroundColor:
+                                            _isRecording ? Colors.red : null,
+                                      ),
+                                      label: Text(_isRecording
+                                          ? 'Stop recording'
+                                          : 'Record'),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ],
                             const SizedBox(height: 12),
@@ -834,6 +1021,59 @@ class _FullCameraView extends StatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// Circular notification button with an optional red unread-count badge.
+class _NotifIconButton extends StatelessWidget {
+  const _NotifIconButton({required this.unread, required this.onTap});
+
+  final int unread;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        _CircleIconButton(
+          icon: Icons.notifications,
+          onTap: onTap,
+        ),
+        if (unread > 0)
+          Positioned(
+            top: -4,
+            right: -4,
+            child: _UnreadBadge(count: unread),
+          ),
+      ],
+    );
+  }
+}
+
+/// Small red pill showing an unread notification count.
+class _UnreadBadge extends StatelessWidget {
+  const _UnreadBadge({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+      decoration: BoxDecoration(
+        color: Colors.red,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        count > 99 ? '99+' : '$count',
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 10,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
     );
   }
 }
