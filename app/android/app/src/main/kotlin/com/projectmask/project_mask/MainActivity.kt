@@ -75,6 +75,11 @@ class MainActivity : FlutterActivity() {
         if (resultCode == Activity.RESULT_OK && data != null) {
             val pm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             val projection = pm.getMediaProjection(resultCode, data)
+            if (projection == null) {
+                pendingCaptureResult?.success(false)
+                pendingCaptureResult = null
+                return
+            }
             // Give the FGS a moment to reach onStartCommand before beginCapture.
             Handler(Looper.getMainLooper()).postDelayed({
                 val svc = ViewerCaptureService.instance
