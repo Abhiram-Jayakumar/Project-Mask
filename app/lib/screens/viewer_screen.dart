@@ -44,12 +44,49 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
   final GlobalKey _captureKey = GlobalKey();
   bool _isRecording = false;
 
+  // Tracks the previous peer-connected state to detect "host came back" event.
+  bool _prevPeerConnected = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _controller = CallController(role: Role.viewer, serverUrl: widget.serverUrl);
     _controller.start();
+    _controller.addListener(_onControllerChange);
+  }
+
+  /// Detects the moment peerConnected flips true after a host reboot/disconnect
+  /// and shows a "Host is back online" banner.
+  void _onControllerChange() {
+    final connected = _controller.peerConnected;
+    if (connected && !_prevPeerConnected && _controller.hostReconnecting) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.white, size: 18),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Host is back online — session resumed',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor: const Color(0xFF2E7D32),
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 4),
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8)),
+          ),
+        );
+      });
+    }
+    _prevPeerConnected = connected;
   }
 
   @override
@@ -168,6 +205,7 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
 
   @override
   void dispose() {
+    _controller.removeListener(_onControllerChange);
     if (_isRecording) CaptureService.stopRecording(); // fire-and-forget
     // Always restore system UI when leaving the viewer.
     if (_fullscreen) SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -250,6 +288,15 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                           setState(() => _cameraExpanded = true),
                     ),
                   _audioSink(),
+                  // Top-left: host online / reconnecting status badge.
+                  Positioned(
+                    top: 20,
+                    left: 16,
+                    child: _HostStatusBadge(
+                      connected: _controller.peerConnected,
+                      reconnecting: _controller.hostReconnecting,
+                    ),
+                  ),
                   // Top-right controls: listen toggle + view-host + exit.
                   Positioned(
                     top: 20,
@@ -377,7 +424,12 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                             Text(_controller.status,
                                 style:
                                     Theme.of(context).textTheme.titleMedium),
-                            const SizedBox(height: 12),
+                            const SizedBox(height: 8),
+                            _HostStatusBadge(
+                              connected: _controller.peerConnected,
+                              reconnecting: _controller.hostReconnecting,
+                            ),
+                            const SizedBox(height: 8),
                             _audioSink(),
                           BatteryOptimizationCard(controller: _controller),
                             if (!connected) ...[
@@ -1072,6 +1124,111 @@ class _UnreadBadge extends StatelessWidget {
           color: Colors.white,
           fontSize: 10,
           fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+}
+
+/// Coloured pill showing whether the host is connected, reconnecting, or gone.
+///
+/// Green + solid dot  → host online (peerConnected = true)
+/// Amber + pulsing dot → host went offline but session is still open
+/// Hidden              → not in a session
+class _HostStatusBadge extends StatelessWidget {
+  const _HostStatusBadge({required this.connected, required this.reconnecting});
+
+  final bool connected;
+  final bool reconnecting;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!connected && !reconnecting) return const SizedBox.shrink();
+    final color =
+        connected ? const Color(0xFF2E7D32) : const Color(0xFFF57F17);
+    final label = connected ? 'Host online' : 'Host reconnecting…';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        border: Border.all(color: color.withValues(alpha: 0.45)),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _PulsingDot(color: color, pulsing: !connected),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A small circle that optionally pulses (opacity breathes) to signal activity.
+class _PulsingDot extends StatefulWidget {
+  const _PulsingDot({required this.color, required this.pulsing});
+
+  final Color color;
+  final bool pulsing;
+
+  @override
+  State<_PulsingDot> createState() => _PulsingDotState();
+}
+
+class _PulsingDotState extends State<_PulsingDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _anim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    );
+    if (widget.pulsing) _anim.repeat(reverse: true);
+  }
+
+  @override
+  void didUpdateWidget(_PulsingDot old) {
+    super.didUpdateWidget(old);
+    if (widget.pulsing && !old.pulsing) {
+      _anim.repeat(reverse: true);
+    } else if (!widget.pulsing && old.pulsing) {
+      _anim
+        ..stop()
+        ..value = 1.0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _anim.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _anim,
+      builder: (context, _) => Opacity(
+        opacity: widget.pulsing ? 0.4 + _anim.value * 0.6 : 1.0,
+        child: Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(
+            color: widget.color,
+            shape: BoxShape.circle,
+          ),
         ),
       ),
     );

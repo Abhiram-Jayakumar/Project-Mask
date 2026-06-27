@@ -120,6 +120,9 @@ class CallController extends ChangeNotifier {
   bool signalingConnected = false;
   bool dataChannelOpen = false;
   bool peerConnected = false;
+  /// VIEWER: true from the moment the host drops until the session explicitly
+  /// ends. Used to show the "reconnecting" badge and the "host is back" banner.
+  bool hostReconnecting = false;
   bool isSharing = false;
   bool ignoringBatteryOptimizations = true; // true = exempt (or web/unsupported)
 
@@ -287,6 +290,7 @@ class CallController extends ChangeNotifier {
     _signaling.onHostDisconnected = () {
       // Viewer side: host dropped but the session is held briefly — keep waiting.
       peerConnected = false;
+      hostReconnecting = true;
       _addLog('Host disconnected — waiting for it to reconnect…');
       _setStatus('Host reconnecting…');
     };
@@ -346,6 +350,7 @@ class CallController extends ChangeNotifier {
         notificationFeed.clear();
         unreadNotifCount = 0;
         capturePermitted = false;
+        hostReconnecting = false; // session fully ended — clear the flag
       }
       _addLog('Peer left');
       _setStatus('Peer disconnected');
