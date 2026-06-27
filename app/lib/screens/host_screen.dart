@@ -284,6 +284,10 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
                     ),
                   if (!kIsWeb) ...[
                     const SizedBox(height: 8),
+                    _LocationCard(controller: _controller),
+                  ],
+                  if (!kIsWeb) ...[
+                    const SizedBox(height: 8),
                     _SharedFoldersCard(controller: _controller),
                   ],
                   const SizedBox(height: 8),
@@ -362,6 +366,60 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
           ),
         ),
       ),
+      ),
+    );
+  }
+}
+
+/// HOST: card to share live location + battery level with the viewer.
+class _LocationCard extends StatelessWidget {
+  const _LocationCard({required this.controller});
+
+  final CallController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.location_on),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text('Share my location & battery'),
+                ),
+                Switch(
+                  value: controller.locationAllowed,
+                  onChanged: (v) => v
+                      ? controller.allowLocation()
+                      : controller.disallowLocation(),
+                ),
+              ],
+            ),
+            if (controller.locationAllowed)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  controller.locationActive
+                      ? 'Sending live GPS + battery to the viewer.'
+                      : 'Waiting for GPS fix…',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
+            if (!controller.locationAllowed)
+              const Padding(
+                padding: EdgeInsets.only(top: 4),
+                child: Text(
+                  'Viewer can track your position on a map and see battery level.',
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }

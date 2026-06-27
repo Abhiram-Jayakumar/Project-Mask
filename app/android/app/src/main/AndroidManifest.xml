@@ -32,6 +32,16 @@
          be automatically restored with a single tap on the notification. -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
 
+    <!-- Host live-location feature: fine GPS for accurate routing. Background
+         location (ACCESS_BACKGROUND_LOCATION) lets the foreground service read
+         GPS while the host app is in the background / swiped off recents.
+         FOREGROUND_SERVICE_LOCATION is required on Android 14+ so the FGS can
+         declare the "location" type without a SecurityException. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+
     <!-- Optional front-camera "presence" feature: the host explicitly taps to
          share their camera so the viewer can see them (like a video call).
          Android shows the camera indicator while it's active. -->
@@ -85,7 +95,7 @@
             android:name=".ScreenCaptureService"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="mediaProjection|camera|microphone|connectedDevice" />
+            android:foregroundServiceType="mediaProjection|camera|microphone|connectedDevice|location" />
 
         <!-- Generic keep-alive foreground service for the viewer role; also
              survives task removal so the control link isn't dropped. -->

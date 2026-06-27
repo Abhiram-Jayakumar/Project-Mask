@@ -155,7 +155,7 @@ class _FileBrowserPanelState extends State<FileBrowserPanel> {
       return ListView.separated(
         controller: sc,
         itemCount: folders.length,
-        separatorBuilder: (_, __) => const Divider(height: 1),
+        separatorBuilder: (_, _) => const Divider(height: 1),
         itemBuilder: (_, i) {
           final path = folders[i];
           return ListTile(
@@ -196,7 +196,7 @@ class _FileBrowserPanelState extends State<FileBrowserPanel> {
     return ListView.separated(
       controller: sc,
       itemCount: entries.length,
-      separatorBuilder: (_, __) => const Divider(height: 1),
+      separatorBuilder: (_, _) => const Divider(height: 1),
       itemBuilder: (_, i) {
         final entry = entries[i];
         final fullPath = '${_pathStack.last}/${entry.name}';

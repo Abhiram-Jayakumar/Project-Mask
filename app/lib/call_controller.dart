@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -8,6 +7,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'config.dart';
 import 'services/connection_service.dart';
 import 'services/file_access_service.dart';
+import 'services/location_service.dart';
 import 'services/pin_crypto.dart';
 import 'services/screen_capture_service.dart';
 import 'services/session_store.dart';
@@ -83,6 +83,18 @@ class CallController extends ChangeNotifier {
   ({String name, Uint8List bytes})? downloadReady;
   String? downloadError;
 
+  // ── Location + battery ─────────────────────────────────────────────────────
+  // HOST side
+  bool locationAllowed = false; // host opted-in to share location
+  bool locationActive = false;  // GPS stream is running
+
+  // VIEWER side
+  bool locationAvailable = false;          // host permits sharing
+  LocationUpdate? hostLocation;            // most-recent fix
+  final List<LocationUpdate> locationHistory = []; // travel route this session
+  int? hostBattery;                        // 0-100
+  bool hostBatteryCharging = false;
+
   String status = 'Idle';
   String? sessionId;
   String? sessionPin;
@@ -142,17 +154,22 @@ class CallController extends ChangeNotifier {
       _pinHash = stored.hash;
       hasPin = true;
     }
-    // Restore the host's camera/mic "allow" choices so a reboot/re-arm doesn't
-    // require re-toggling them (the OS camera/mic permissions already persist).
+    // Restore the host's camera/mic/location "allow" choices so a reboot/re-arm
+    // doesn't require re-toggling (the OS permissions already persist).
     final mediaPrefs = await SessionStore.getMediaPrefs();
     cameraAllowed = mediaPrefs.camera;
     micAllowed = mediaPrefs.mic;
+    locationAllowed = mediaPrefs.location;
     permittedFolders = await SessionStore.getPermittedFolders();
     notifyListeners();
   }
 
   void _persistMediaPrefs() {
-    SessionStore.setMediaPrefs(camera: cameraAllowed, mic: micAllowed);
+    SessionStore.setMediaPrefs(
+      camera: cameraAllowed,
+      mic: micAllowed,
+      location: locationAllowed,
+    );
   }
 
   /// Re-check whether the app is exempt from battery optimization. A session can
@@ -270,9 +287,10 @@ class CallController extends ChangeNotifier {
     _signaling.onPeerLeft = () {
       dataChannelOpen = false;
       peerConnected = false;
-      // HOST: viewer's gone — stop camera/mic so they aren't left running.
+      // HOST: viewer's gone — stop camera/mic/location so they aren't left running.
       if (role == Role.host && cameraActive) _stopCameraInternal();
       if (role == Role.host && micActive) _stopMicInternal();
+      if (role == Role.host && locationActive) _stopLocationInternal();
       if (role == Role.viewer) {
         cameraAvailable = false;
         cameraOn = false;
@@ -293,6 +311,11 @@ class CallController extends ChangeNotifier {
         downloadReady = null;
         downloadError = null;
         _downloadChunks.clear();
+        locationAvailable = false;
+        hostLocation = null;
+        locationHistory.clear();
+        hostBattery = null;
+        hostBatteryCharging = false;
       }
       _addLog('Peer left');
       _setStatus('Peer disconnected');
@@ -335,6 +358,10 @@ class CallController extends ChangeNotifier {
         _signalCameraAvailability();
         _signalMicAvailability();
         _signalFoldersAvailability();
+        _signalLocationAvailability();
+        // Restart the GPS+battery stream so the new viewer immediately gets
+        // an update if location sharing was already active.
+        if (locationAllowed) _startLocationInternal();
       }
     };
     _webrtc.onDataMessage = (text) {
@@ -442,6 +469,8 @@ class CallController extends ChangeNotifier {
     if (cameraActive) await _stopCameraInternal();
     micAllowed = false;
     if (micActive) await _stopMicInternal();
+    locationAllowed = false;
+    _stopLocationInternal();
     _persistMediaPrefs();
     if (isSharing) {
       await _webrtc.removeScreenTrack();
@@ -635,6 +664,68 @@ class CallController extends ChangeNotifier {
   void requestHostMic(bool want) {
     if (!dataChannelOpen) return;
     _webrtc.sendData(jsonEncode({'t': 'mic', 'want': want}));
+  }
+
+  // ── Location + battery ─────────────────────────────────────────────────────
+
+  /// HOST: consent to share live location + battery with the viewer. Starts the
+  /// GPS stream immediately and advertises availability over the data channel.
+  Future<void> allowLocation() async {
+    if (kIsWeb) return;
+    locationAllowed = true;
+    _persistMediaPrefs();
+    _addLog('Location sharing enabled');
+    _signalLocationAvailability();
+    await _startLocationInternal();
+    notifyListeners();
+  }
+
+  /// HOST: revoke location sharing and stop the GPS stream.
+  Future<void> disallowLocation() async {
+    locationAllowed = false;
+    _stopLocationInternal();
+    _persistMediaPrefs();
+    _signalLocationAvailability();
+    notifyListeners();
+  }
+
+  void _signalLocationAvailability() {
+    if (dataChannelOpen) {
+      _webrtc.sendData(jsonEncode({'t': 'locavail', 'on': locationAllowed}));
+    }
+  }
+
+  Future<void> _startLocationInternal() async {
+    if (locationActive || !locationAllowed || kIsWeb) return;
+    locationActive = true;
+    LocationService.onLocation = (update) {
+      if (!dataChannelOpen) return;
+      _webrtc.sendData(jsonEncode({
+        't': 'locupdate',
+        'lat': update.lat,
+        'lng': update.lng,
+        'acc': update.accuracy,
+      }));
+    };
+    LocationService.onBattery = (pct, charging) {
+      if (!dataChannelOpen) return;
+      _webrtc.sendData(jsonEncode({
+        't': 'battery',
+        'pct': pct,
+        'charging': charging,
+      }));
+    };
+    await LocationService.startTracking();
+    _addLog('Location tracking started');
+  }
+
+  void _stopLocationInternal() {
+    if (!locationActive) return;
+    locationActive = false;
+    LocationService.onLocation = null;
+    LocationService.onBattery = null;
+    LocationService.stopTracking();
+    _addLog('Location tracking stopped');
   }
 
   // ── File access ────────────────────────────────────────────────────────────
@@ -961,6 +1052,30 @@ class CallController extends ChangeNotifier {
       notifyListeners();
       return true;
     }
+    // ── Location + battery (viewer receives) ─────────────────────────────────
+    if (role == Role.viewer && t == 'locavail') {
+      locationAvailable = data['on'] == true;
+      notifyListeners();
+      return true;
+    }
+    if (role == Role.viewer && t == 'locupdate') {
+      final lat = (data['lat'] as num?)?.toDouble();
+      final lng = (data['lng'] as num?)?.toDouble();
+      final acc = (data['acc'] as num?)?.toDouble() ?? 0.0;
+      if (lat != null && lng != null) {
+        final update = LocationUpdate(lat: lat, lng: lng, accuracy: acc);
+        hostLocation = update;
+        locationHistory.add(update);
+        notifyListeners();
+      }
+      return true;
+    }
+    if (role == Role.viewer && t == 'battery') {
+      hostBattery = (data['pct'] as num?)?.toInt();
+      hostBatteryCharging = data['charging'] == true;
+      notifyListeners();
+      return true;
+    }
     return false;
   }
 
@@ -987,6 +1102,7 @@ class CallController extends ChangeNotifier {
         _signaling.disarmDevice();
         await SessionStore.setArmedState(false);
       }
+      if (locationActive) _stopLocationInternal();
       if (isSharing) await _webrtc.stopLocalStream();
       await ScreenCaptureService.stopService();
       isSharing = false;

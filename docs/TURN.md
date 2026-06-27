@@ -37,13 +37,14 @@ networks that block 3478/UDP:
 
 ```bash
 flutter build apk --release \
-  --dart-define=SIGNALING_URL=https://project-mask.onrender.com \
-  --dart-define=TURN_URL=turn:relay1.expressturn.com:3478,turns:relay1.expressturn.com:443 \
+  --dart-define=SIGNALING_URL=https://your-app.onrender.com \
+  --dart-define=TURN_URL=turn:<host>:3478,turns:<host>:443 \
   --dart-define=TURN_USERNAME=<your-username> \
   --dart-define=TURN_CREDENTIAL=<your-credential>
 ```
 
-(Use the exact host/ports shown on your provider's dashboard.)
+Replace `your-app.onrender.com` with your own Render app name and use the exact
+host/ports shown on your TURN provider's dashboard.
 
 > Note: the old no-signup "Open Relay" static credentials
 > (`openrelay.metered.ca` / `openrelayproject`) have been **retired** — Open Relay

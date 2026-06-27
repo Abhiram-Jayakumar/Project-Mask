@@ -7,6 +7,7 @@ import '../services/system_service.dart';
 import '../widgets/connection_panel.dart';
 import '../widgets/file_browser_panel.dart';
 import '../widgets/keep_alive_cards.dart';
+import '../widgets/location_map_panel.dart';
 import '../widgets/remote_control_surface.dart';
 
 /// Viewer = the controlling device. Enters a session ID + PIN, watches the host's
@@ -28,10 +29,11 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
   late final CallController _controller;
   final TextEditingController _idController = TextEditingController();
   final TextEditingController _pinController = TextEditingController();
-  bool _closing = false;    // set true only when the user ends the session
-  bool _fullscreen = false; // true → video fills screen, system bars hidden
-  bool _showHostCam = false; // viewer chose to view the host's camera tile
-  bool _listenHost = false; // viewer chose to listen to the host's mic
+  bool _closing = false;      // set true only when the user ends the session
+  bool _fullscreen = false;   // true → video fills screen, system bars hidden
+  bool _showHostCam = false;  // viewer chose to view the host's camera tile
+  bool _cameraExpanded = false; // camera is shown full-frame (over screen share)
+  bool _listenHost = false;   // viewer chose to listen to the host's mic
 
   @override
   void initState() {
@@ -73,12 +75,18 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
   /// (so it's only live while actually being watched); toggling off stops it.
   void _toggleHostCam() {
     final next = !_showHostCam;
-    setState(() => _showHostCam = next);
+    setState(() {
+      _showHostCam = next;
+      if (!next) _cameraExpanded = false;
+    });
     _controller.requestHostCamera(next);
   }
 
   void _closeHostCam() {
-    setState(() => _showHostCam = false);
+    setState(() {
+      _showHostCam = false;
+      _cameraExpanded = false;
+    });
     _controller.requestHostCamera(false);
   }
 
@@ -138,6 +146,18 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
         body: ListenableBuilder(
           listenable: _controller,
           builder: (context, _) {
+            // True when the host is actively sending their screen.
+            final hasScreen = _controller.remoteRenderer.srcObject != null;
+            // Camera fills the frame when: no screen share at all, OR the viewer
+            // tapped the expand button on the small tile.
+            final cameraFull = _controller.cameraOn &&
+                _showHostCam &&
+                (!hasScreen || _cameraExpanded);
+            final cameraSmall = _controller.cameraOn &&
+                _showHostCam &&
+                hasScreen &&
+                !_cameraExpanded;
+
             // ── Fullscreen mode ─────────────────────────────────────────────
             if (_fullscreen) {
               return Stack(
@@ -149,13 +169,24 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                       renderer: _controller.remoteRenderer,
                     ),
                   ),
-                  // Host camera presence — the viewer opens it on demand and it
-                  // floats as a draggable window (never covers the screen).
-                  if (_controller.cameraOn && _showHostCam)
+                  // Full-frame camera: no screen share, or viewer expanded it.
+                  if (cameraFull)
+                    _FullCameraView(
+                      renderer: _controller.cameraRenderer,
+                      onClose: _closeHostCam,
+                      onFlip: _controller.requestCameraFlip,
+                      showMinimize: hasScreen && _cameraExpanded,
+                      onMinimize: () =>
+                          setState(() => _cameraExpanded = false),
+                    ),
+                  // Small draggable tile when screen share is active.
+                  if (cameraSmall)
                     _DraggableCameraTile(
                       renderer: _controller.cameraRenderer,
                       bounds: MediaQuery.of(context).size,
                       onClose: _closeHostCam,
+                      onExpand: () =>
+                          setState(() => _cameraExpanded = true),
                     ),
                   _audioSink(),
                   // Top-right controls: listen toggle + view-host + exit.
@@ -180,7 +211,9 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                           ),
                           const SizedBox(width: 8),
                         ],
-                        if (_controller.cameraOn && _showHostCam) ...[
+                        // Flip button in overlay only while camera is small tile;
+                        // when full-frame the flip button lives inside _FullCameraView.
+                        if (cameraSmall) ...[
                           _CircleIconButton(
                             icon: Icons.flip_camera_android,
                             onTap: _controller.requestCameraFlip,
@@ -191,6 +224,16 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                           _CircleIconButton(
                             icon: Icons.folder_open,
                             onTap: () => FileBrowserPanel.show(
+                              context,
+                              _controller,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        if (_controller.locationAvailable) ...[
+                          _CircleIconButton(
+                            icon: Icons.location_on,
+                            onTap: () => LocationMapPanel.show(
                               context,
                               _controller,
                             ),
@@ -327,8 +370,26 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                                 ),
                                               ),
                                             ),
-                                            if (_controller.cameraOn &&
-                                                _showHostCam)
+                                            // Full-frame camera: no screen share
+                                            // or viewer expanded the tile.
+                                            if (cameraFull)
+                                              Positioned.fill(
+                                                child: _FullCameraView(
+                                                  renderer: _controller
+                                                      .cameraRenderer,
+                                                  onClose: _closeHostCam,
+                                                  onFlip: _controller
+                                                      .requestCameraFlip,
+                                                  showMinimize: hasScreen &&
+                                                      _cameraExpanded,
+                                                  onMinimize: () => setState(
+                                                      () => _cameraExpanded =
+                                                          false),
+                                                ),
+                                              ),
+                                            // Small draggable tile when screen
+                                            // share is active.
+                                            if (cameraSmall)
                                               _DraggableCameraTile(
                                                 renderer:
                                                     _controller.cameraRenderer,
@@ -336,6 +397,8 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                                     frameW - 12, frameH - 12),
                                                 tileSize: const Size(72, 96),
                                                 onClose: _closeHostCam,
+                                                onExpand: () => setState(() =>
+                                                    _cameraExpanded = true),
                                               ),
                                           ],
                                         ),
@@ -366,11 +429,20 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                           ),
                                           const SizedBox(width: 8),
                                         ],
-                                        if (_controller.cameraOn &&
-                                            _showHostCam) ...[
+                                        if (cameraSmall) ...[
                                           _CircleIconButton(
                                             icon: Icons.flip_camera_android,
                                             onTap: _controller.requestCameraFlip,
+                                          ),
+                                          const SizedBox(width: 8),
+                                        ],
+                                        if (_controller.locationAvailable) ...[
+                                          _CircleIconButton(
+                                            icon: Icons.location_on,
+                                            onTap: () => LocationMapPanel.show(
+                                              context,
+                                              _controller,
+                                            ),
                                           ),
                                           const SizedBox(width: 8),
                                         ],
@@ -425,6 +497,34 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                   'Browse files'
                                   ' (${_controller.availableFolders.length}'
                                   ' folder${_controller.availableFolders.length == 1 ? '' : 's'})',
+                                ),
+                              ),
+                            ],
+                            // Location map — visible when the host shares location.
+                            if (connected && _controller.locationAvailable) ...[
+                              const SizedBox(height: 8),
+                              OutlinedButton.icon(
+                                onPressed: () => LocationMapPanel.show(
+                                  context,
+                                  _controller,
+                                ),
+                                icon: const Icon(Icons.location_on),
+                                style: OutlinedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                      vertical: 14),
+                                ),
+                                label: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Text('View host location'),
+                                    if (_controller.hostBattery != null) ...[
+                                      const SizedBox(width: 8),
+                                      _BatteryPill(
+                                        pct: _controller.hostBattery!,
+                                        charging: _controller.hostBatteryCharging,
+                                      ),
+                                    ],
+                                  ],
                                 ),
                               ),
                             ],
@@ -509,12 +609,15 @@ class _DraggableCameraTile extends StatefulWidget {
     required this.bounds,
     required this.onClose,
     this.tileSize = const Size(96, 128),
+    this.onExpand,
   });
 
   final RTCVideoRenderer renderer;
   final Size bounds;
   final VoidCallback onClose;
   final Size tileSize;
+  /// Optional callback: when tapped, expands the camera to fill the frame.
+  final VoidCallback? onExpand;
 
   @override
   State<_DraggableCameraTile> createState() => _DraggableCameraTileState();
@@ -562,6 +665,24 @@ class _DraggableCameraTileState extends State<_DraggableCameraTile> {
                   ),
                 ),
               ),
+              // Expand button — bottom-left corner of the tile.
+              if (widget.onExpand != null)
+                Positioned(
+                  bottom: -8,
+                  left: -8,
+                  child: GestureDetector(
+                    onTap: widget.onExpand,
+                    child: const CircleAvatar(
+                      radius: 11,
+                      backgroundColor: Colors.black87,
+                      child: Icon(
+                        Icons.open_in_full,
+                        size: 13,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
@@ -628,6 +749,135 @@ class _ConnectFields extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Camera feed filling its parent entirely — used when there is no screen share
+/// or when the viewer has expanded the small camera tile. Must be a child of a
+/// Stack (or wrapped in [Positioned.fill] in a non-expand Stack).
+class _FullCameraView extends StatelessWidget {
+  const _FullCameraView({
+    required this.renderer,
+    required this.onClose,
+    required this.onFlip,
+    this.showMinimize = false,
+    this.onMinimize,
+  });
+
+  final RTCVideoRenderer renderer;
+  final VoidCallback onClose;
+  final VoidCallback onFlip;
+  /// True when a screen share exists in the background — shows a "show screen"
+  /// pill at the bottom so the viewer can shrink the camera back.
+  final bool showMinimize;
+  final VoidCallback? onMinimize;
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        // Camera video fills the entire area.
+        Positioned.fill(
+          child: RTCVideoView(
+            renderer,
+            objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+          ),
+        ),
+        // Close button — top-left.
+        Positioned(
+          top: 8,
+          left: 8,
+          child: _CircleIconButton(icon: Icons.close, onTap: onClose),
+        ),
+        // Flip camera — top-right.
+        Positioned(
+          top: 8,
+          right: 8,
+          child: _CircleIconButton(
+            icon: Icons.flip_camera_android,
+            onTap: onFlip,
+          ),
+        ),
+        // "Show screen" minimize pill — bottom-center, only when screen share
+        // is active behind the camera.
+        if (showMinimize && onMinimize != null)
+          Positioned(
+            bottom: 12,
+            left: 0,
+            right: 0,
+            child: Center(
+              child: GestureDetector(
+                onTap: onMinimize,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 14, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.picture_in_picture_alt,
+                          color: Colors.white, size: 14),
+                      SizedBox(width: 6),
+                      Text(
+                        'Show screen',
+                        style:
+                            TextStyle(color: Colors.white, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// Compact battery pill shown inline on the "View host location" button.
+class _BatteryPill extends StatelessWidget {
+  const _BatteryPill({required this.pct, required this.charging});
+
+  final int pct;
+  final bool charging;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = pct > 50
+        ? Colors.green
+        : pct > 20
+            ? Colors.orange
+            : Colors.red;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        border: Border.all(color: color.withValues(alpha: 0.5)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            charging ? Icons.battery_charging_full : Icons.battery_std,
+            size: 12,
+            color: color,
+          ),
+          const SizedBox(width: 2),
+          Text(
+            '$pct%',
+            style: TextStyle(
+              fontSize: 11,
+              color: color,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
