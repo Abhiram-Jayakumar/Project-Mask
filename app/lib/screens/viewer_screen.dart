@@ -459,7 +459,28 @@ class _ViewerScreenState extends State<ViewerScreen> with WidgetsBindingObserver
                                           leading: const Icon(Icons.history),
                                           title: Text('ID ${s.id}'),
                                           subtitle: Text('PIN ${s.pin}'),
-                                          trailing: const Icon(Icons.login),
+                                          trailing: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              if (_controller
+                                                  .signalingConnected)
+                                                const Icon(Icons.login,
+                                                    size: 20),
+                                              IconButton(
+                                                icon: const Icon(
+                                                    Icons.delete_outline,
+                                                    size: 20),
+                                                tooltip: 'Remove',
+                                                padding: EdgeInsets.zero,
+                                                constraints:
+                                                    const BoxConstraints(),
+                                                onPressed: () =>
+                                                    _controller
+                                                        .removeRecentSession(
+                                                            s.id),
+                                              ),
+                                            ],
+                                          ),
                                           onTap: _controller.signalingConnected
                                               ? () {
                                                   _idController.text = s.id;

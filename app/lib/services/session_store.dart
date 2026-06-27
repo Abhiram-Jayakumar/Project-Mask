@@ -156,6 +156,16 @@ class SessionStore {
     );
   }
 
+  static Future<void> removeViewerHistoryEntry(String id) async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = await getViewerHistory()
+      ..removeWhere((e) => e.id == id);
+    await prefs.setString(
+      _kViewerHistory,
+      jsonEncode(list.map((e) => e.toJson()).toList()),
+    );
+  }
+
   static Future<void> clearViewerHistory() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_kViewerHistory);

@@ -462,6 +462,12 @@ class CallController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// VIEWER: remove a single entry from the local session history.
+  Future<void> removeRecentSession(String id) async {
+    await SessionStore.removeViewerHistoryEntry(id);
+    await _loadRecentSessions();
+  }
+
   /// Phase-2 verification helper: prove the P2P data channel works end-to-end.
   void sendTestPing() {
     final msg = 'ping@${DateTime.now().millisecondsSinceEpoch}';
